@@ -31,8 +31,12 @@ import kotlin.math.sqrt
  *   这样手动调节变化时，新数据会自然覆盖旧数据
  * - 置信度机制：学习次数少时补偿幅度打折扣，避免过度补偿
  *
- * 数据存储：单一文件 Download/chajian/mingwuyan/loudness_stats.json（用户可见、可直接查看），
- * 不再使用 SharedPreferences。文件内字段为中文易读格式。
+ * 数据存储：单一 JSON 文件，位于**应用私有外部目录**
+ * `Android/data/<包名>/files/loudness/loudness_stats.json`（外部存储不可用时退回应用内部 filesDir）。
+ * 不再使用 SharedPreferences，文件内字段为中文易读格式。
+ *
+ * 历史版本曾存于公共 `Download/chajian/mingwuyan/`：那需要「所有文件访问权限」，
+ * 该权限已从本应用移除（写必然失败），因此旧路径现在只保留**一次性读取迁移**。
  */
 object SpeakerLoudnessManager {
     private val logger = KotlinLogging.logger("SpeakerLoudnessManager")
@@ -47,15 +51,25 @@ object SpeakerLoudnessManager {
     private const val MIN_MEDIAN_SPEAKERS = 2
     private const val MAX_ATTENUATION_DB = 9f
 
-    /**
-     * 学习数据文件：/storage/emulated/0/Download/chajian/mingwuyan/loudness_stats.json
-     * 不放 chajian 根目录（用户要求），归入 mingwuyan 插件子目录。这是唯一存储，用户可直接查看。
-     */
-    private const val FILE_BASE_DIR = "/storage/emulated/0/Download/chajian"
-    private const val FILE_DIR_NAME = "mingwuyan"
+    /** 学习数据文件名；实际路径 = <私有存储目录>/loudness/loudness_stats.json */
     private const val FILE_NAME = "loudness_stats.json"
-    /** 旧版本路径（chajian 根目录）：仅用于一次性迁移到新位置 */
-    private val legacyFile = File("/storage/emulated/0/Download/chajian", FILE_NAME)
+    private const val FILE_DIR_NAME = "loudness"
+
+    /**
+     * 历史版本存放位置（公共 Download 目录）：写读都需要「所有文件访问权限」，而该权限
+     * 已从本应用移除，所以这里**只用于一次性读取迁移**；A11+ 上读到不存在/无权即静默跳过。
+     * 顺序即优先级：先 mingwuyan 子目录（较新），再 chajian 根目录（更旧）。
+     */
+    private val legacyFiles = listOf(
+        File("/storage/emulated/0/Download/chajian/mingwuyan", FILE_NAME),
+        File("/storage/emulated/0/Download/chajian", FILE_NAME),
+    )
+
+    /** 由 init() 注入的 Application Context，用于解析私有存储目录 */
+    private var appContext: Context? = null
+
+    /** 惰性解析并缓存的数据文件（避免每次写盘都调 getExternalFilesDir） */
+    private var cachedFile: File? = null
 
     private val lock = Any()
     private var cachedStats: MutableMap<String, LoudnessStat> = linkedMapOf()
@@ -105,16 +119,16 @@ object SpeakerLoudnessManager {
 
     /**
      * 初始化，需在 Application 中调用。
-     * @param context Android Context（保留以备将来按 context 解析存储路径）
+     * @param context Android Context，用于解析应用私有存储目录（取 applicationContext，不持有 Activity）
      * @param enabledProvider 响度均衡是否启用的 provider
      * @param maxGainProvider 最大增益 provider（如 1.35f 表示 135%）
      */
-    @Suppress("UNUSED_PARAMETER")
     fun init(
         context: Context,
         enabledProvider: () -> Boolean,
         maxGainProvider: () -> Float
     ) {
+        appContext = context.applicationContext
         this.enabledProvider = enabledProvider
         this.maxGainProvider = maxGainProvider
         loadFromFileLocked()
@@ -318,22 +332,31 @@ object SpeakerLoudnessManager {
     }
 
     /**
-     * 从 Download/chajian/mingwuyan/loudness_stats.json 读取数据到内存缓存。
+     * 数据文件：应用私有外部目录 `Android/data/<包名>/files/loudness/loudness_stats.json`；
+     * 外部存储不可用时退回应用内部 `filesDir`。未 init()（拿不到 Context）时返回 null。
+     *
+     * 私有目录**不需要任何存储权限**，这是 A11 移除「所有文件访问权限」后的合规位置。
+     */
+    private fun resolveFile(): File? {
+        cachedFile?.let { return it }
+        val ctx = appContext ?: return null
+        val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+        return File(base, "$FILE_DIR_NAME/$FILE_NAME").also { cachedFile = it }
+    }
+
+    /**
+     * 从私有目录读取数据到内存缓存；目标文件不存在时先尝试从旧公共路径一次性迁移。
      * 文件不存在或解析失败时回退为空数据，不影响播放。
      */
     private fun loadFromFileLocked() {
         fileLoaded = true
         runCatching {
-            val file = File(FILE_BASE_DIR, FILE_DIR_NAME + "/" + FILE_NAME)
-            if (!file.exists()) {
-                // 一次性迁移：旧版放在 chajian 根目录，搬进 mingwuyan 子目录避免学习数据丢失
-                if (legacyFile.exists()) {
-                    file.parentFile?.mkdirs()
-                    if (legacyFile.renameTo(file)) {
-                        logger.info { "loudness stats migrated to $file" }
-                    }
-                }
+            val file = resolveFile()
+            if (file == null) {
+                cachedStats = linkedMapOf()
+                return@runCatching
             }
+            if (!file.exists()) migrateFromLegacyLocked(file)
             if (!file.exists()) {
                 cachedStats = linkedMapOf()
                 return@runCatching
@@ -343,6 +366,28 @@ object SpeakerLoudnessManager {
         }.onFailure {
             logger.warn(it) { "loudness load from file failed" }
             cachedStats = linkedMapOf()
+        }
+    }
+
+    /**
+     * 一次性迁移：把旧版公共 Download 目录里的学习数据复制到私有目录。
+     *
+     * 用 copyTo 而非 renameTo——旧文件可能只读，且跨卷 rename 会失败；
+     * A11+ 上旧路径不可读，`exists()` 直接为 false，静默跳过（学习数据从零重新积累）。
+     */
+    private fun migrateFromLegacyLocked(target: File) {
+        for (legacy in legacyFiles) {
+            val migrated = runCatching {
+                if (!legacy.exists() || legacy.length() <= 0L) return@runCatching false
+                target.parentFile?.mkdirs()
+                legacy.copyTo(target, overwrite = true)
+                true
+            }.getOrDefault(false)
+
+            if (migrated) {
+                logger.info { "loudness stats migrated to $target" }
+                return
+            }
         }
     }
 
@@ -401,18 +446,17 @@ object SpeakerLoudnessManager {
     }
 
     /**
-     * 把内存数据以中文易读格式写入 Download/chajian/mingwuyan/loudness_stats.json。
+     * 把内存数据以中文易读格式写入私有目录 loudness/loudness_stats.json。
      * 这是唯一存储，整体覆盖写入；失败仅记录日志，不影响播放（内存缓存仍有效）。
      */
     private fun persistLocked() {
         runCatching {
-            val dir = File(FILE_BASE_DIR, FILE_DIR_NAME)
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, FILE_NAME)
+            val file = resolveFile() ?: return@runCatching
             if (cachedStats.isEmpty()) {
                 if (file.exists()) file.delete()
                 return@runCatching
             }
+            file.parentFile?.mkdirs()
             val root = JSONObject()
             cachedStats.forEach { (key, stat) ->
                 val displayKey = buildDisplayKey(stat.displayName, key)
@@ -433,8 +477,11 @@ object SpeakerLoudnessManager {
 
     private fun deleteFileLocked() {
         runCatching {
-            val file = File(FILE_BASE_DIR, FILE_DIR_NAME + "/" + FILE_NAME)
-            if (file.exists()) file.delete()
+            resolveFile()?.takeIf { it.exists() }?.delete()
+            // 旧公共路径也一并清掉：否则重置后重启会从旧文件重新迁移回来
+            legacyFiles.forEach { legacy ->
+                runCatching { legacy.takeIf { it.exists() }?.delete() }
+            }
         }.onFailure { logger.warn(it) { "loudness delete file failed" } }
     }
 

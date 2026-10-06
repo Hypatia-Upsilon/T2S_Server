@@ -11,11 +11,15 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log // 👈 使用原生日志
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -37,6 +41,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.github.jing332.common.utils.ChajianSync
 import com.github.jing332.common.utils.toast
 import com.github.jing332.database.dbm
 import com.github.jing332.database.entities.AbstractListGroup.Companion.DEFAULT_GROUP_ID
@@ -49,9 +54,14 @@ import com.github.jing332.tts_server_android.compose.systts.list.ui.widgets.TtsE
 import com.github.jing332.tts_server_android.compose.theme.AppTheme
 import com.github.jing332.tts_server_android.conf.AppConfig
 import com.github.jing332.tts_server_android.service.systts.SystemTtsService
+import com.github.jing332.tts_server_android.ui.AppActivityResultContracts
+import com.github.jing332.tts_server_android.ui.FilePickerActivity
+import com.github.jing332.tts_server_android.ui.view.AppDialogs.displayErrorDialog
 import com.drake.net.utils.withIO
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 
@@ -100,6 +110,60 @@ class MainActivity : ComposeActivity() {
                             task?.setExcludeFromRecents(excludeFromRecent)
                         }
                     }
+                }
+
+                // ── chajian 数据目录首次引导 ──
+                // 数据根已从公共 Download/chajian 迁到 Android/data/<包名>/files/chajian
+                //（旧位置的读写需要「所有文件访问权限」，该权限已移除，A11+ 上必然失败）。
+                // 这里引导用户用 SAF 指定旧文件夹，把数据一次性导入新目录；
+                // 本地副本已有数据或已引导过则不再打扰。
+                var showChajianGuide by remember { mutableStateOf(false) }
+                val chajianScope = rememberCoroutineScope()
+                LaunchedEffect(Unit) {
+                    showChajianGuide = withContext(Dispatchers.IO) {
+                        ChajianSync.shouldShowFirstRunGuide(this@MainActivity)
+                    }
+                }
+                val chajianGuidePicker = rememberLauncherForActivityResult(
+                    contract = AppActivityResultContracts.filePickerActivity()
+                ) { result ->
+                    ChajianSync.markFirstRunGuideShown(this@MainActivity)
+                    val uri = result.second ?: return@rememberLauncherForActivityResult
+                    ChajianSync.setTree(this@MainActivity, uri)
+                    chajianScope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                ChajianSync.importFromTree(this@MainActivity, uri)
+                            }
+                        }.onSuccess { r ->
+                            toast(
+                                getString(R.string.chajian_sync_done, r.copied, r.skipped, r.failed) +
+                                    if (r.truncated) getString(R.string.chajian_sync_truncated) else ""
+                            )
+                        }.onFailure { displayErrorDialog(it) }
+                    }
+                }
+                if (showChajianGuide) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            showChajianGuide = false
+                            ChajianSync.markFirstRunGuideShown(this@MainActivity)
+                        },
+                        title = { Text(stringResource(R.string.chajian_guide_title)) },
+                        text = { Text(stringResource(R.string.chajian_guide_text, packageName)) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showChajianGuide = false
+                                chajianGuidePicker.launch(FilePickerActivity.RequestSelectDir())
+                            }) { Text(stringResource(R.string.chajian_guide_pick)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                showChajianGuide = false
+                                ChajianSync.markFirstRunGuideShown(this@MainActivity)
+                            }) { Text(stringResource(R.string.chajian_guide_later)) }
+                        }
+                    )
                 }
 
                 MainScreen { finish() }

@@ -1,5 +1,6 @@
 package com.github.jing332.tts_server_android.service.systts.help
 
+import com.github.jing332.common.utils.ChajianDir
 import com.github.jing332.tts_server_android.conf.SystemTtsConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -104,7 +105,8 @@ internal object InnerThoughtAiClassifier {
      */
     private fun readMiyueTxt(): Triple<String, String, String>? {
         return runCatching {
-            val root = File("/storage/emulated/0/Download/chajian")
+            // 数据根目录统一由 ChajianDir 解析（Android/data/<包名>/files/chajian）
+            val root = ChajianDir.root
             val dirs = root.listFiles(File::isDirectory) ?: return@runCatching null
             for (dir in dirs) {
                 val f = File(dir, "miyue.txt")

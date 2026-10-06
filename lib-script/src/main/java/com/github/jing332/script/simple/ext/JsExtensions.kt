@@ -3,6 +3,7 @@ package com.github.jing332.script.simple.ext
 import android.content.Context
 import cn.hutool.core.lang.UUID
 import com.github.jing332.common.audio.AudioDecoder
+import com.github.jing332.common.utils.ChajianDir
 import com.github.jing332.common.utils.FileUtils
 import com.github.jing332.script.annotation.ScriptInterface
 import java.io.File
@@ -87,8 +88,8 @@ open class JsExtensions(open val context: Context, open val engineId: String = "
      */
     @ScriptInterface
     fun getFile(path: String): File {
-        // 缓存路径：/storage/emulated/0/Download/chajian
-        val cachePath = File("/storage/emulated/0/Download/chajian", engineId).absolutePath
+        // 缓存路径：Android/data/<包名>/files/chajian/<engineId>（由 ChajianDir 统一解析，零权限）
+        val cachePath = ChajianDir.of(engineId).absolutePath
 
         if (!FileUtils.exists(cachePath)) File(cachePath).mkdirs()
         val aPath = if (path.startsWith(File.separator)) {

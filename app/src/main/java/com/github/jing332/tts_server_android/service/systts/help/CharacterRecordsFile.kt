@@ -1,6 +1,7 @@
 package com.github.jing332.tts_server_android.service.systts.help
 
 import android.util.Log
+import com.github.jing332.common.utils.ChajianDir
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -8,7 +9,7 @@ import java.io.File
 /**
  * 角色管理本地文件的 app 侧读写通道（用户 09-08 互通定稿）：
  * 角色管理插件经 ttsrv.readTxtFile/writeTxtFile 把数据存在
- * /storage/emulated/0/Download/chajian/<tagRuleId>/ 下——
+ * <ChajianDir.root>/<tagRuleId>/ 下（即 Android/data/<包名>/files/chajian/…）——
  *  - characterRecords.json：[{name=角色名, voice=发音人标签, gender, age...}]（绑定关系）
  *  - fayinren.json：["标签1","标签2"...]（规则声明的发音人标签池，换发音人候选）
  * 日志快捷面板「发音人调整」与其同源读写，实现与角色管理换发音人完全互通。
@@ -18,7 +19,9 @@ import java.io.File
  */
 object CharacterRecordsFile {
     private const val TAG = "CharacterRecordsFile"
-    private const val BASE_DIR = "/storage/emulated/0/Download/chajian"
+
+    /** 数据根目录由 ChajianDir 统一解析（Android/data/<包名>/files/chajian，零权限且用户可见） */
+    private val BASE_DIR: String get() = ChajianDir.rootPath
 
     private fun recordsFile(tagRuleId: String) = File(File(BASE_DIR, tagRuleId), "characterRecords.json")
     private fun poolFile(tagRuleId: String) = File(File(BASE_DIR, tagRuleId), "fayinren.json")

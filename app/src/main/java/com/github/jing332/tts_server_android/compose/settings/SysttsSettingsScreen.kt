@@ -1,10 +1,15 @@
 package com.github.jing332.tts_server_android.compose.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.NightsStay
@@ -13,6 +18,7 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.StackedLineChart
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Timer
@@ -27,16 +33,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastRoundToInt
+import com.github.jing332.common.utils.ChajianSync
+import com.github.jing332.common.utils.toast
 import com.github.jing332.compose.widgets.TextFieldDialog
 import com.github.jing332.tts_server_android.R
 import com.github.jing332.tts_server_android.conf.AppConfig
 import com.github.jing332.tts_server_android.conf.SystemTtsConfig
+import com.github.jing332.tts_server_android.ui.AppActivityResultContracts
+import com.github.jing332.tts_server_android.ui.FilePickerActivity
+import com.github.jing332.tts_server_android.ui.view.AppDialogs.displayErrorDialog
 import com.github.jing332.tts.loudness.SpeakerLoudnessManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 本文件负责的两个区（10-05 用户令：稳定性不再是"页面内折叠"，改为设置页上的一个入口行，
@@ -222,6 +238,140 @@ internal fun ColumnScope.SysttsSettingsScreen(
         )
     }
     } // 朗读与播放区收尾（10-05 分区）
+
+    // ── 数据目录（chajian）与 SAF 同步目录 ──
+    // 背景：chajian 根目录已从公共 Download/chajian 迁到 Android/data/<包名>/files/chajian
+    //（旧位置读写需要「所有文件访问权限」，该权限已移除）。插件契约是 java.io.File，
+    // 无法直接以 SAF URI 为数据根，故这里提供「用户指定目录 ↔ 本地副本」的双向同步。
+    SettingsGroup(title = { Text(stringResource(R.string.chajian_group)) }, show = !search.active()) {
+        val context = LocalContext.current
+        var syncDirName by remember { mutableStateOf(ChajianSync.treeName(context)) }
+        var autoSync by remember { mutableStateOf(ChajianSync.isAutoSyncEnabled(context)) }
+        var syncing by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+
+        fun report(r: ChajianSync.Result) {
+            val msg = context.getString(
+                R.string.chajian_sync_done, r.copied, r.skipped, r.failed
+            ) + if (r.truncated) context.getString(R.string.chajian_sync_truncated) else ""
+            context.toast(msg)
+        }
+
+        fun runSync(block: (android.net.Uri) -> ChajianSync.Result) {
+            val uri = ChajianSync.treeUri(context)
+            if (uri == null) {
+                context.toast(R.string.chajian_sync_need_dir)
+                return
+            }
+            if (syncing) return
+            syncing = true
+            scope.launch {
+                runCatching { withContext(Dispatchers.IO) { block(uri) } }
+                    .onSuccess { report(it) }
+                    .onFailure { context.displayErrorDialog(it) }
+                syncing = false
+            }
+        }
+
+        val chajianDirPicker = rememberLauncherForActivityResult(
+            contract = AppActivityResultContracts.filePickerActivity()
+        ) { result ->
+            val uri = result.second ?: return@rememberLauncherForActivityResult
+            ChajianSync.setTree(context, uri)
+            ChajianSync.markFirstRunGuideShown(context)
+            syncDirName = ChajianSync.treeName(context)
+            // 选定即导入一次：这正是「首次引导用户指定 Download/chajian 把旧数据拿回来」的主路径
+            runSync { target -> ChajianSync.importFromTree(context, target) }
+        }
+
+        SettingItem(search, "数据目录", "chajian", "同步", "SAF", "导入", "导出", "备份", "插件数据") {
+            BasePreferenceWidget(
+                onClick = { chajianDirPicker.launch(FilePickerActivity.RequestSelectDir()) },
+                icon = { Icon(Icons.Default.Folder, null) },
+                title = { Text(stringResource(R.string.chajian_sync_dir)) },
+                subTitle = {
+                    Text(
+                        syncDirName?.takeIf { it.isNotBlank() }
+                            ?.let { stringResource(R.string.chajian_sync_dir_set, it) }
+                            ?: stringResource(R.string.chajian_sync_dir_unset, context.packageName)
+                    )
+                }
+            )
+        }
+
+        // 自动同步开关：开启后「启动时自动导入 + 应用退到后台时自动导出」；
+        // 开启瞬间先做一次双向收敛（先拉后推），让用户立刻看到效果
+        SettingItem(search, "自动同步", "chajian", "自动", "后台", "启动", "同步") {
+            SwitchPreference(
+                title = { Text(stringResource(R.string.chajian_sync_auto)) },
+                subTitle = { Text(stringResource(R.string.chajian_sync_auto_summary)) },
+                checked = autoSync,
+                onCheckedChange = { checked ->
+                    autoSync = checked
+                    ChajianSync.setAutoSyncEnabled(context, checked)
+                    if (!checked || syncing) return@SwitchPreference
+                    val uri = ChajianSync.treeUri(context)
+                    if (uri == null) {
+                        context.toast(R.string.chajian_sync_need_dir)
+                        return@SwitchPreference
+                    }
+                    syncing = true
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                // 先导入（把目录里更新的拉下来），再导出（把本地更新的推上去）
+                                val pull = ChajianSync.importFromTree(context, uri)
+                                val push = ChajianSync.exportToTree(context, uri)
+                                ChajianSync.Result(
+                                    copied = pull.copied + push.copied,
+                                    skipped = pull.skipped + push.skipped,
+                                    failed = pull.failed + push.failed,
+                                    truncated = pull.truncated || push.truncated,
+                                )
+                            }
+                        }.onSuccess { report(it) }
+                            .onFailure { context.displayErrorDialog(it) }
+                        syncing = false
+                    }
+                },
+                icon = { Icon(Icons.Default.Sync, null) }
+            )
+        }
+
+        SettingItem(search, "导入", "chajian", "从目录导入", "同步", "恢复数据") {
+            BasePreferenceWidget(
+                onClick = { runSync { target -> ChajianSync.importFromTree(context, target) } },
+                icon = { Icon(Icons.Default.FileDownload, null) },
+                title = { Text(stringResource(R.string.chajian_sync_import)) },
+                subTitle = { Text(stringResource(R.string.chajian_sync_import_summary)) },
+                showChevron = false
+            )
+        }
+
+        SettingItem(search, "导出", "chajian", "导出到目录", "同步", "备份数据") {
+            BasePreferenceWidget(
+                onClick = { runSync { target -> ChajianSync.exportToTree(context, target) } },
+                icon = { Icon(Icons.Default.FileUpload, null) },
+                title = { Text(stringResource(R.string.chajian_sync_export)) },
+                subTitle = { Text(stringResource(R.string.chajian_sync_export_summary)) },
+                showChevron = false
+            )
+        }
+
+        if (!syncDirName.isNullOrBlank()) {
+            SettingItem(search, "清除同步目录", "chajian", "取消", "同步") {
+                BasePreferenceWidget(
+                    onClick = {
+                        ChajianSync.clearTree(context)
+                        syncDirName = null
+                    },
+                    icon = { Icon(Icons.Default.FolderOff, null) },
+                    title = { Text(stringResource(R.string.chajian_sync_clear)) },
+                    showChevron = false
+                )
+            }
+        }
+    }
     } else {
     // 稳定性（子页形态，10-05 用户令：由"页面内折叠"改为独立子页；标题在子页顶栏，卡内不出标题）
     SettingsGroup(

@@ -1,14 +1,15 @@
 package com.github.jing332.tts_server_android.service.systts.help
 
 import android.util.Log
+import com.github.jing332.common.utils.ChajianDir
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
  * 发音人标记（voice_marks.json）的 app 侧读写通道，与角色管理 v10 完全同源：
- * 文件位于 /storage/emulated/0/Download/chajian/<tagRuleId>/voice_marks.json
- *（插件 ttsrv.readTxtFile/writeTxtFile 的 getFile 同样落到该目录），
+ * 文件位于 <ChajianDir.root>/<tagRuleId>/voice_marks.json
+ *（即 Android/data/<包名>/files/chajian/…；插件 ttsrv.readTxtFile/writeTxtFile 的 getFile 同样落到该目录），
  * 结构：{ "标签": ["like","neutral","bad"], ... }（键=标签 id，数组多选，值可任意组合）。
  * 日志快捷面板候选行 ⋮ 菜单与其同源读写，实现与角色管理「发音人标记」互通。
  *
@@ -17,7 +18,9 @@ import java.io.File
  */
 object VoiceMarksFile {
     private const val TAG = "VoiceMarksFile"
-    private const val BASE_DIR = "/storage/emulated/0/Download/chajian"
+
+    /** 数据根目录由 ChajianDir 统一解析（Android/data/<包名>/files/chajian，零权限且用户可见） */
+    private val BASE_DIR: String get() = ChajianDir.rootPath
 
     private fun marksFile(tagRuleId: String) = File(File(BASE_DIR, tagRuleId), "voice_marks.json")
 

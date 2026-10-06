@@ -348,6 +348,25 @@
     <string name="loudness_reset">重置响度学习数据</string>
     <string name="loudness_reset_summary">已学习 %1$d 个发音人，点击清空全部重新学习</string>
     <string name="loudness_reset_confirm">将清空 %1$d 个发音人的响度学习数据，下次播放会重新开始学习。确定继续吗？</string>
+    <!-- 数据目录（chajian）与 SAF 同步目录 -->
+    <string name="chajian_group">数据目录</string>
+    <string name="chajian_sync_dir">同步目录（SAF）</string>
+    <string name="chajian_sync_dir_unset">未设置。本地目录：Android/data/%1$s/files/chajian；点此选择手机上任一文件夹（如 Download/chajian）用于导入与备份</string>
+    <string name="chajian_sync_dir_set">已设置：%1$s（点此更换）</string>
+    <string name="chajian_sync_import">从同步目录导入</string>
+    <string name="chajian_sync_import_summary">把同步目录里的文件拉进本地数据目录；按修改时间比对，新者优先，不删本地多余文件</string>
+    <string name="chajian_sync_export">导出到同步目录</string>
+    <string name="chajian_sync_export_summary">把本地数据目录推到同步目录，便于备份、换机或电脑直接编辑</string>
+    <string name="chajian_sync_clear">清除同步目录</string>
+    <string name="chajian_sync_auto">自动同步</string>
+    <string name="chajian_sync_auto_summary">开启后：每次启动自动从同步目录导入，退到后台（回桌面/切走）时自动导出本地改动</string>
+    <string name="chajian_sync_need_dir">请先选择同步目录</string>
+    <string name="chajian_sync_done">同步完成：更新 %1$d 个，跳过 %2$d 个，失败 %3$d 个</string>
+    <string name="chajian_sync_truncated">（已达文件数上限，剩余未处理）</string>
+    <string name="chajian_guide_title">选择数据目录</string>
+    <string name="chajian_guide_text">旧版数据放在公共 Download/chajian 目录，读写它需要「所有文件访问权限」，该权限已移除。\n\n请选择该文件夹，把数据导入新版目录（Android/data/%1$s/files/chajian）。不选也可以，之后随时能在「设置 → 数据目录」里选择。</string>
+    <string name="chajian_guide_pick">选择文件夹</string>
+    <string name="chajian_guide_later">稍后</string>
     <string name="bgm">背景音乐</string>
     <string name="exo_player_title">媒体播放器</string>
     <string name="remote_sync_service">远程同步</string>

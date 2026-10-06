@@ -1,6 +1,7 @@
 package com.github.jing332.tts_server_android.service.systts.help
 
 import android.util.Log
+import com.github.jing332.common.utils.ChajianDir
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -15,7 +16,9 @@ import java.net.URL
  */
 object KeyListFile {
     private const val TAG = "KeyListFile"
-    private const val BASE_DIR = "/storage/emulated/0/Download/chajian"
+
+    /** 数据根目录由 ChajianDir 统一解析（Android/data/<包名>/files/chajian，零权限且用户可见） */
+    private val BASE_DIR: String get() = ChajianDir.rootPath
 
     /** 密钥导出固定文件名（10-03 用户令：覆盖导出、导入只认这个名）。 */
     const val EXPORT_FILE_NAME = "密钥备份.json"

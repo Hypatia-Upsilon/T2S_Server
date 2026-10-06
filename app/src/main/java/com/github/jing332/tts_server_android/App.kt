@@ -1,10 +1,13 @@
 package com.github.jing332.tts_server_android
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.os.Process 
+import com.github.jing332.common.utils.ChajianSync
 import com.github.jing332.compose.widgets.AsyncCircleImageSettings
 import com.github.jing332.database.entities.systts.SystemTtsV2
 import com.github.jing332.database.entities.systts.AudioParams
@@ -23,6 +26,8 @@ import coil3.annotation.DelicateCoilApi
 import coil3.request.crossfade
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 // 👇 新增：NetConfig 配置所需的包
 import com.drake.net.NetConfig
@@ -101,6 +106,22 @@ class App : Application() {
         )
 
         GlobalScope.launch {
+            // chajian 数据目录迁移：旧的公共 Download/chajian 读写需要「所有文件访问权限」，
+            // 该权限已移除；新位置为应用专属的 Android/data/<包名>/files/chajian（零权限、规范 API）。
+            // 幂等，放 IO 线程；失败只记日志，不影响启动。
+            runCatching {
+                com.drake.net.utils.withIO {
+                    com.github.jing332.common.utils.ChajianDir.migrateFromLegacyIfNeeded()
+                }
+            }
+
+            // 自动同步（开关开启时才真正执行）：启动时把同步目录里更新的文件拉下来
+            runCatching {
+                com.drake.net.utils.withIO {
+                    com.github.jing332.common.utils.ChajianSync.autoImport(this@App)
+                }
+            }
+
             // 直连改造后角色管理宿主配置项为遗留物：启动时清理（数据在 chajian 文件，删除零损失）
             runCatching {
                 com.drake.net.utils.withIO {
@@ -117,6 +138,40 @@ class App : Application() {
                 switchSysTtsForwarder()
             }
         }
+
+        // ── 自动同步：整个应用退到后台时导出一次 ──
+        // 用 Activity 计数近似 ProcessLifecycleOwner 语义（不为一个开关引入 lifecycle-process 依赖）：
+        // 计数归零 = 自家所有 Activity 都不在前台 = 应用进后台。
+        // 2s 防抖：选目录、跳系统选择器等瞬时前台切换不触发导出；回前台即取消。
+        // "是否开启自动同步 / 是否已选目录" 由 ChajianSync.autoExport 内部判断，未开启时直接返回。
+        registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            private var startedCount = 0
+            private var backgroundJob: Job? = null
+
+            override fun onActivityStarted(activity: Activity) {
+                startedCount++
+                backgroundJob?.cancel()
+                backgroundJob = null
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                startedCount--
+                if (startedCount > 0) return
+                backgroundJob?.cancel()
+                backgroundJob = GlobalScope.launch {
+                    delay(2_000)
+                    runCatching {
+                        com.drake.net.utils.withIO { ChajianSync.autoExport(this@App) }
+                    }
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
     }
 
     @SuppressLint("UnspecifiedImmutableFlag")
