@@ -19,6 +19,11 @@ sealed class PagerDestination(
     @StringRes val strId: Int,
     @StringRes val contentDescId: Int,
     val icon: @Composable () -> Unit = {},
+    /**
+     * 底栏标签用的**简短词汇**（底栏窄，长词会挤）：未提供时同 [strId]。
+     * 例：角色管理 → 「角色」。
+     */
+    @StringRes val shortStrId: Int = strId,
 ) {
     companion object {
         val routes by lazy {
@@ -40,13 +45,20 @@ sealed class PagerDestination(
     })
 
     // 角色管理：独立于发音人，承载「仅界面模式」的工具型插件
-    object Tool : PagerDestination(2, R.string.role_management, R.string.role_management, {
-        Icon(
-            modifier = Modifier.size(24.dp),
-            imageVector = Icons.Default.AccountCircle,
-            contentDescription = null
-        )
-    })
+    // 底栏标签用简短词汇「角色」（整页标题仍用 role_management=角色管理）
+    object Tool : PagerDestination(
+        index = 2,
+        strId = R.string.role_management,
+        contentDescId = R.string.role_management,
+        icon = {
+            Icon(
+                modifier = Modifier.size(24.dp),
+                imageVector = Icons.Default.AccountCircle,
+                contentDescription = null
+            )
+        },
+        shortStrId = R.string.role_short,
+    )
 
     object SystemTtsLog : PagerDestination(1, R.string.log, R.string.log, {
         Icon(

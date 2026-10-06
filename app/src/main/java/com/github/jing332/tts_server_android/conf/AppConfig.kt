@@ -68,6 +68,11 @@ object AppConfig {
     // 音效插件按文本正则取音效，全局句匹配不上；单独一份可填音效名直接试听
     val localSoundSampleText by lazy { mutableDataSaverStateOf(dataSaverPref, "localSoundSampleText", "你好，这是试听语音。") }
     val fragmentIndex by lazy { mutableDataSaverStateOf(dataSaverPref, "fragmentIndex", 0) }
+
+    // 底栏（MD3 NavigationBar）标签是否常驻：默认 false = 遵循 MD3「仅选中项显示标签」
+    val isBottomBarLabelAlwaysShow by lazy {
+        mutableDataSaverStateOf(dataSaverPref, "isBottomBarLabelAlwaysShow", false)
+    }
     // spinnerMaxDropDownCount 已删（10-05 用户令「下拉框内容最大数」为假开关：全仓无消费点，
     // AppSpinner 用 lib-compose 的 ComposeWidgetSettings.maxDropDownCount=3，两处从未接线）
     val lastReadHelpDocumentVersion by lazy { mutableDataSaverStateOf(dataSaverPref, "lastReadHelpDocumentVersion", 0) }

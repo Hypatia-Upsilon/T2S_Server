@@ -7,11 +7,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -20,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.BottomAppBarDefaults
@@ -28,25 +25,25 @@ import androidx.compose.material3.BottomAppBarScrollBehavior
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.semantics.Role
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.github.jing332.compose.widgets.ControlBottomBarVisibility
 import com.github.jing332.compose.widgets.rememberA11TouchEnabled
@@ -84,6 +81,8 @@ fun AnimatedContentScope.MainPager(sharedVM: SharedViewModel) {
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 底栏标签：MD3 默认仅选中项显示；此开关开启后四项常显
+    val alwaysShowLabels by AppConfig.isBottomBarLabelAlwaysShow
     MigrationTips()
 
     val a11yTouchEnabled = rememberA11TouchEnabled()
@@ -129,62 +128,41 @@ fun AnimatedContentScope.MainPager(sharedVM: SharedViewModel) {
             Scaffold(
                 modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
                 bottomBar = {
-                    // 自绘微信式底栏（替代 M3 NavigationBar）：M3 最低 80dp（32dp 胶囊撑高），
-                    // 微信/QQ同款 60dp：24dp 图标+3dp 图文缝+中文常显，选中态无胶囊、图标文字同染 primary
+                    // MD3 底栏（Material3 NavigationBar）：与全局 Material3 风格一致。
+                    // 标签遵循 MD3「仅选中项显示」，可在「设置 → 常用 → 底栏标签常驻」切换为常显；
+                    // 文案取 PagerDestination.shortStrId（底栏窄，用简短词汇，如「角色」）。
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         color = MaterialTheme.colorScheme.surfaceContainer
                     ) {
                         Column {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(60.dp)
-                                    .padding(horizontal = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
+                            NavigationBar(
+                                modifier = Modifier.fillMaxWidth(),
+                                containerColor = Color.Transparent,
+                                tonalElevation = 0.dp,
+                                // 底部手势条留白交给下面的 Spacer，沿用"手势区与底栏同色无缝"的既有策略
+                                windowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
                             ) {
                                 for (destination in PagerDestination.routes) {
-                                    val isSelected =
-                                        pagerState.currentPage == destination.index
-                                    // 微信式：无胶囊，选中态图标文字同染 primary，未选中 onSurfaceVariant
-                                    val contentColor =
-                                        if (isSelected) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurfaceVariant
-                                    Column(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(MaterialTheme.shapes.medium)
-                                            .clickable(
-                                                role = Role.Tab,
-                                                onClick = {
-                                                    scope.launch {
-                                                        pagerState.animateScrollToPage(destination.index)
-                                                    }
-                                                }
-                                            )
-                                            .padding(vertical = 6.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        // 图文缝 3dp+垂直居中：微信松弛感的关键，贴死会显得紧巴巴
-                                        verticalArrangement = Arrangement.spacedBy(
-                                            3.dp,
-                                            Alignment.CenterVertically
-                                        )
-                                    ) {
-                                        CompositionLocalProvider(
-                                            LocalContentColor provides contentColor
-                                        ) {
-                                            Box(Modifier.size(24.dp)) {
-                                                destination.icon()
+                                    NavigationBarItem(
+                                        selected = pagerState.currentPage == destination.index,
+                                        onClick = {
+                                            scope.launch {
+                                                pagerState.animateScrollToPage(destination.index)
                                             }
-                                        }
-                                        Text(
-                                            stringResource(destination.strId),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = contentColor,
-                                            maxLines = 1
-                                        )
-                                    }
+                                        },
+                                        icon = { destination.icon() },
+                                        label = {
+                                            Text(
+                                                text = stringResource(destination.shortStrId),
+                                                maxLines = 1,
+                                                textAlign = TextAlign.Center,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        },
+                                        // MD3 默认：只有选中项显示标签；开启设置项后四项常显
+                                        alwaysShowLabel = alwaysShowLabels,
+                                    )
                                 }
                             }
                             // 手势条区域与底栏同色：Android14+ 关闭导航栏半透明后，

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Input
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.filled.SettingsBackupRestore
+import androidx.compose.material.icons.filled.SpaceBar
 import android.content.IntentFilter
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.Switch
@@ -213,6 +214,18 @@ fun SettingsScreen() {
                 }
 
                 // 「语言」整项已删（10-05 用户令：只留中文，外语翻译五个目录一并退役）
+
+                // 底栏标签常驻：MD3 默认只给选中项显示标签，长按需/习惯"四项都看得见"的用户可开启常显
+                SettingItem(search, "底栏标签", "导航", "标签", "常驻", "bottom", "bar", "外观") {
+                    var alwaysShowBarLabel by remember { AppConfig.isBottomBarLabelAlwaysShow }
+                    SwitchPreference(
+                        title = { Text(stringResource(id = R.string.bottom_bar_label_always_show)) },
+                        subTitle = { Text(stringResource(id = R.string.bottom_bar_label_always_show_summary)) },
+                        checked = alwaysShowBarLabel,
+                        onCheckedChange = { alwaysShowBarLabel = it },
+                        icon = { Icon(Icons.Default.SpaceBar, contentDescription = null) }
+                    )
+                }
 
                 SettingItem(search, "备份", "恢复", "backup", "restore") {
                 BasePreferenceWidget(
