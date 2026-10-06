@@ -32,6 +32,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.github.jing332.common.utils.ASFUriUtils.getPath
+import com.github.jing332.common.utils.SafUtils
 import com.github.jing332.tts_server_android.R
 import com.github.jing332.tts_server_android.compose.ComposeActivity
 import com.github.jing332.tts_server_android.compose.theme.AppTheme
@@ -90,11 +91,9 @@ class ExoPlayerActivity : ComposeActivity(), Player.Listener {
         }
 
         intent.data?.let { uri ->
-            text = try {
-                getPath(uri, isTree = false) ?: ""
-            } catch (e: Exception) {
-                uri.toString()
-            }
+            // content:// (SAF) 拿不到真实路径，退化为「文件名 / 目录名」显示
+            text = runCatching { getPath(uri, isTree = false) }.getOrNull().orEmpty()
+                .ifBlank { SafUtils.displayName(this, uri.toString()) }
             exoPlayer.addMediaItem(MediaItem.fromUri(uri))
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true

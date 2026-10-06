@@ -477,7 +477,7 @@ abstract class AbstractMixSynthesizer() : Synthesizer {
         try {
             repo.getAllBgm().forEach { bgm ->
                 bgm.musicList.forEach {
-                    bgmList.add(BgmSource(path = it, volume = bgm.volume))
+                    bgmList.add(BgmSource(uri = it, volume = bgm.volume))
                 }
             }
 

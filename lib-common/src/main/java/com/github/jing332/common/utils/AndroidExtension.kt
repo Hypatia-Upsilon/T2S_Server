@@ -106,11 +106,19 @@ fun Context.startActivity(clz: Class<*>) {
     startActivity(Intent(this, clz).apply { action = Intent.ACTION_VIEW })
 }
 
+/**
+ * 把选择器返回的授权**持久化**（重启后仍可访问该 URI）。
+ *
+ * 优先按「读写」申请；部分 Provider（或只授予读权限的选择器，如仅 ACTION_OPEN_DOCUMENT
+ * 选中的文档）会抛 SecurityException，此时降级为「只读」持久授权，
+ * 避免整个选择流程直接崩溃（BGM 只需要读）。
+ */
 fun Uri.grantReadWritePermission(contentResolver: ContentResolver) {
-    contentResolver.takePersistableUriPermission(
-        this,
-        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-    )
+    val read = Intent.FLAG_GRANT_READ_URI_PERMISSION
+    val write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    runCatching { contentResolver.takePersistableUriPermission(this, read or write) }
+        .recoverCatching { contentResolver.takePersistableUriPermission(this, read) }
+        .onFailure { it.printStackTrace() }
 }
 
 

@@ -7,13 +7,17 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import com.github.jing332.common.utils.FileUtils
-import com.github.jing332.common.utils.FileUtils.mimeType
+import com.github.jing332.common.utils.SafUtils
 import com.github.jing332.tts.synthesizer.BgmSource
 import com.github.jing332.tts.synthesizer.IBgmPlayer
 import com.github.jing332.tts.synthesizer.event.NormalEvent
 import io.github.oshai.kotlinlogging.KotlinLogging
-import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.pow
 
 
@@ -26,6 +30,13 @@ class BgmPlayer(val context: SynthesizerContext) : IBgmPlayer {
     private var exoPlayer: ExoPlayer? = null
     private val currentPlayList = mutableListOf<BgmSource>()
     private var currentSource: BgmSource? = null
+
+    /**
+     * 播放列表解析协程：SAF `content://` 目录要跨进程查询，必须离开主线程。
+     * 这里只取消「列表解析」任务，不取消 scope——destroy() 后同一实例仍可能被重新 init()。
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var playlistJob: Job? = null
 
     @OptIn(UnstableApi::class)
     @MainThread
@@ -74,6 +85,8 @@ class BgmPlayer(val context: SynthesizerContext) : IBgmPlayer {
     override fun destroy() {
         logger.debug { "bgm destroy" }
 
+        playlistJob?.cancel()
+        playlistJob = null
         currentPlayList.clear()
         exoPlayer?.release()
         exoPlayer = null
@@ -106,31 +119,27 @@ class BgmPlayer(val context: SynthesizerContext) : IBgmPlayer {
 
         exoPlayer?.stop()
         exoPlayer?.clearMediaItems()
-        for (source in list) {
-            val file = File(source.path)
-            if (file.isDirectory) {
-                val allFiles = FileUtils.getAllFilesInFolder(file)
-                    .run { if (context.cfg.bgmShuffleEnabled()) this.shuffled() else this }
-                for (subFile in allFiles) {
-                    if (!addMediaItem(source, subFile)) continue
+
+        // 条目现在多为 SAF content:// URI（单文件或目录树）：
+        // 目录需要跨进程递归查询，放到 IO 线程；查完回主线程一次性喂给 ExoPlayer。
+        playlistJob?.cancel()
+        playlistJob = scope.launch {
+            val mediaItems = withContext(Dispatchers.IO) {
+                list.flatMap { source ->
+                    // 单个条目（目录）内部是否打乱，跟随 BGM 随机播放设置
+                    SafUtils.listAudio(context.androidContext, source.uri)
+                        .run { if (context.cfg.bgmShuffleEnabled()) shuffled() else this }
+                        .map { audio ->
+                            MediaItem.Builder().setTag(source).setUri(audio.uriString).build()
+                        }
                 }
-            } else if (file.isFile) {
-                addMediaItem(source, file)
             }
+
+            // 解析期间可能已 destroy()，此时直接丢弃
+            if (exoPlayer == null) return@launch
+            mediaItems.forEach { exoPlayer?.addMediaItem(it) }
+            exoPlayer?.prepare()
         }
-        exoPlayer?.prepare()
-    }
-
-    private fun addMediaItem(source: BgmSource, file: File): Boolean {
-        val mime = file.mimeType
-        // 非audio或未知则跳过
-        if (mime == null || !mime.startsWith("audio")) return false
-
-        val item =
-            MediaItem.Builder().setTag(source).setUri(file.absolutePath).build()
-        exoPlayer?.addMediaItem(item)
-
-        return true
     }
 
 }

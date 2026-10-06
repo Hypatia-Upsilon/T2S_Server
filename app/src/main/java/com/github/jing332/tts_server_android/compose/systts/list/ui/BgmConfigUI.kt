@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,8 +37,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
-import com.github.jing332.common.utils.ASFUriUtils.getPath
-import com.github.jing332.common.utils.FileUtils.audioList
+import com.github.jing332.common.utils.SafAudio
+import com.github.jing332.common.utils.SafUtils
 import com.github.jing332.common.utils.toScale
 import com.github.jing332.common.utils.toast
 import com.github.jing332.compose.ComposeExtensions.clickableRipple
@@ -52,7 +53,8 @@ import com.github.jing332.tts_server_android.ui.AppActivityResultContracts
 import com.github.jing332.tts_server_android.ui.ExoPlayerActivity
 import com.github.jing332.tts_server_android.ui.FilePickerActivity
 import com.github.jing332.tts_server_android.ui.view.AppDialogs.displayErrorDialog
-import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class BgmConfigUI : IConfigUI() {
     override val showSpeechEdit: Boolean = false
@@ -73,45 +75,58 @@ class BgmConfigUI : IConfigUI() {
         val filePicker =
             rememberLauncherForActivityResult(contract = AppActivityResultContracts.filePickerActivity()) {
                 runCatching {
-                    val path =
-                        context.getPath(it.second, it.first is FilePickerActivity.RequestSelectDir)
-                    if (path.isNullOrBlank()) context.toast(R.string.path_is_empty)
+                    // SAF 持久读授权已由 FilePickerActivity 落盘（takePersistableUriPermission），
+                    // 这里直接把 URI 字符串存进配置：不再解析成绝对路径
+                    // —— Android 11+ 没有「所有文件访问权限」时，/storage 路径读不到。
+                    val uri = it.second
+                    if (uri == null) context.toast(R.string.path_is_empty)
                     else {
                         onSystemTtsChange(
                             systemTts.copy(
                                 config = config.copy(
-                                    musicList = config.musicList.toMutableList().apply { add(path) }
+                                    musicList = config.musicList.toMutableList()
+                                        .apply { add(uri.toString()) }
                                 )
                             )
                         )
-
                     }
                 }.onFailure {
                     context.displayErrorDialog(it)
                 }
             }
 
+        // 点条目 → 列出其下音频试听。
+        // content:// 单文件/目录树走 SAF 查询（含跨进程 IO），旧绝对路径仍按 File 处理。
         var showMusicList by remember { mutableStateOf("") }
-        if (showMusicList != "") {
-            val audioFiles = remember(showMusicList) {
-                try {
-                    File(showMusicList).audioList()
-                } catch (e: Exception) {
-                    context.displayErrorDialog(e)
-                    null
+        var audioList by remember { mutableStateOf<List<SafAudio>>(emptyList()) }
+        var audioListLoading by remember { mutableStateOf(false) }
+        LaunchedEffect(showMusicList) {
+            if (showMusicList.isEmpty()) {
+                audioList = emptyList()
+                return@LaunchedEffect
+            }
+            audioListLoading = true
+            runCatching { withContext(Dispatchers.IO) { SafUtils.listAudio(context, showMusicList) } }
+                .onSuccess { audioList = it }
+                .onFailure {
+                    context.displayErrorDialog(it)
+                    audioList = emptyList()
                 }
-            } ?: return
+            audioListLoading = false
+        }
 
+        if (showMusicList != "") {
             AppSelectionDialog(
                 onDismissRequest = { showMusicList = "" },
-                title = { Text(showMusicList) },
+                title = { Text(SafUtils.displayName(context, showMusicList)) },
                 value = Any(),
-                values = audioFiles,
-                entries = audioFiles.map { it.name },
+                values = audioList,
+                entries = audioList.map { it.name },
+                isLoading = audioListLoading,
                 onClick = { value, _ ->
                     context.startActivity(Intent(context, ExoPlayerActivity::class.java).apply {
                         action = Intent.ACTION_VIEW
-                        data = (value as File).toUri()
+                        data = (value as SafAudio).uriString.toUri()
                     })
                 }
             )
@@ -203,7 +218,8 @@ class BgmConfigUI : IConfigUI() {
                                 }
                         ) {
                             Text(
-                                item,
+                                // 条目存的是 content:// URI，展示其短名称（旧绝对路径原样显示）
+                                remember(item) { SafUtils.displayName(context, item) },
                                 modifier = Modifier.weight(1f),
                                 lineHeight = LocalTextStyle.current.lineHeight * 0.8
                             )

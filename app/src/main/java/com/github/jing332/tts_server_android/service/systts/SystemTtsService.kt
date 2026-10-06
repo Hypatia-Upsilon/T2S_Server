@@ -25,6 +25,7 @@ import android.util.Log
 import androidx.annotation.StringRes
 import androidx.core.app.ServiceCompat.stopForeground
 import androidx.core.content.ContextCompat
+import com.github.jing332.common.utils.SafUtils
 import com.github.jing332.common.utils.StringUtils
 import com.github.jing332.common.utils.limitLength
 import com.github.jing332.common.utils.longToast
@@ -932,7 +933,9 @@ class SystemTtsService : TextToSpeechService(), IEventDispatcher {
 
             NormalEvent.RequestCountEnded -> logW(getString(R.string.reach_retry_limit))
             is NormalEvent.BgmCurrentPlaying -> {
-                val name = e.source.path.split("/").lastOrNull() ?: e.source.path
+                // 条目可能是 SAF content:// URI（末段是 percent-encoded 的 docId），
+                // 统一用 SafUtils 取展示名；旧绝对路径仍显示完整路径
+                val name = SafUtils.displayName(this, e.source.uri)
                 logI(getString(R.string.current_playing_bgm, "${e.source.volume}, ${name}"))
             }
         }

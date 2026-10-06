@@ -10,4 +10,8 @@ interface IBgmPlayer {
     )
 }
 
-data class BgmSource(val path: String, val volume: Float)
+/**
+ * @param uri BGM 条目：SAF `content://` URI 字符串，或历史数据遗留的绝对路径
+ *            （统一交给 SafUtils 解析，见 [com.github.jing332.common.utils.SafUtils]）
+ */
+data class BgmSource(val uri: String, val volume: Float)
