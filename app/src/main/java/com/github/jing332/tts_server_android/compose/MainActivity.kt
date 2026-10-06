@@ -6,13 +6,9 @@ import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.SystemClock
-import android.provider.Settings
 import android.util.Log // 👈 使用原生日志
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -84,18 +80,6 @@ class MainActivity : ComposeActivity() {
         super.onCreate(savedInstanceState)
 
         ShortCuts.buildShortCuts(this)
-
-        // 自动申请管理全部文件权限
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            try {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = Uri.parse("package:$packageName")
-                startActivity(intent)
-            } catch (e: Exception) {
-                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                startActivity(intent)
-            }
-        }
 
         setContent {
             AppTheme {

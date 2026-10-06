@@ -1,15 +1,8 @@
 package com.github.jing332.tts_server_android.compose.systts.list.ui
 
-import android.Manifest
 import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,7 +16,6 @@ import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -33,7 +25,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,12 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.github.jing332.common.utils.ASFUriUtils.getPath
 import com.github.jing332.common.utils.FileUtils.audioList
 import com.github.jing332.common.utils.toScale
@@ -178,8 +165,6 @@ class BgmConfigUI : IConfigUI() {
                     .fillMaxWidth()
                     .padding(8.dp)
             ) {
-                FilesAccessPermissionContent(Modifier.fillMaxWidth())
-
                 Row(
                     Modifier.align(Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically
@@ -272,58 +257,6 @@ class BgmConfigUI : IConfigUI() {
                 onSystemTtsChange(systemTts.copy(config = config.copy(volume = 1f)))
             }) {
                 Text(stringResource(id = R.string.reset))
-            }
-        }
-    }
-
-    @Composable
-    private fun FilesAccessPermissionContent(modifier: Modifier = Modifier) {
-        val context = LocalContext.current
-
-        @Composable
-        fun ColumnScope.warnButton(text: String, onClick: () -> Unit) {
-            FilledTonalButton(
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 8.dp),
-                onClick = onClick,
-                content = {
-                    Text(
-                        text,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            )
-        }
-
-        Column(modifier) {
-            // 存储访问统一由「允许管理所有文件」(MANAGE_EXTERNAL_STORAGE) 控制，
-            // 不再单独申请 READ_EXTERNAL_STORAGE 运行时权限(与问题2同类弹窗)。
-            // 文件选择统一走系统 SAF，FilePickerActivity 不再提供内置选择器分支。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { // A11
-                var isGranted by remember { mutableStateOf(Environment.isExternalStorageManager()) }
-                val permissionCheckerObserver = remember {
-                    LifecycleEventObserver { _, event ->
-                        if (event == Lifecycle.Event.ON_RESUME) {
-                            isGranted = Environment.isExternalStorageManager()
-                        }
-                    }
-                }
-                val lifecycle = LocalLifecycleOwner.current.lifecycle
-                DisposableEffect(lifecycle, permissionCheckerObserver) {
-                    lifecycle.addObserver(permissionCheckerObserver)
-                    onDispose { lifecycle.removeObserver(permissionCheckerObserver) }
-                }
-
-                if (!isGranted) {
-                    warnButton(text = stringResource(id = R.string.grant_permission_all_file)) {
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                            setData(Uri.parse("package:${context.packageName}"))
-                        })
-                    }
-                }
             }
         }
     }
