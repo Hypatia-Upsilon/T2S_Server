@@ -1,7 +1,7 @@
 name: 编译验证
 
 on:
-  push:
+  #push:
   #  branches: [ mumu_tts_github ]
   #  paths:
   #    - 'lib-script/**'
