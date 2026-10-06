@@ -1,0 +1,296 @@
+package com.github.jing332.tts
+
+import android.content.Context
+import androidx.annotation.OptIn
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.util.UnstableApi
+import com.github.jing332.common.audio.AudioDecoder
+import com.github.jing332.common.audio.AudioPlayer
+import com.github.jing332.common.audio.exo.ReverbAudioProcessor
+import com.github.jing332.database.entities.systts.AudioParams
+import com.github.jing332.database.entities.systts.SystemTtsV2
+import com.github.jing332.tts.loudness.SpeakerLoudnessManager
+import com.github.jing332.tts.speech.EngineState
+import com.github.jing332.tts.speech.plugin.engine.JsBridgeInputStream
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+
+/** 试听会话状态：合成中(…) / 已出声播放中(■) / 空闲(▶)；与角色管理v9/v10按钮时机对齐 */
+enum class PreviewState { IDLE, SYNTHESIZING, PLAYING }
+
+/**
+ * Silent preview session for plugin-owned UI (for example role management).
+ *
+ * It deliberately does not use MixSynthesizer: previews must not trigger BGM, speech-rule
+ * processing, service logs, or normal reading queues. It does share the exact final resolver,
+ * provider routing, decoding, loudness gain, and local parameter application.
+ */
+object TaggedTtsPreviewPlayer {
+    private const val PREVIEW_TIMEOUT_MS = 30_000L
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lock = Any()
+    private var job: Job? = null
+    // 播放器复用（10-05 性能修，用户：连续试听卡顿/等很久）：原实现每次 play() 都
+    // 「新建 AudioPlayer + release 旧实例」——ExoPlayer 的创建与拆毁都是主线程上的重活
+    // （且 release 对从未用过的 Exo 实例会先惰性创建再销毁，纯白烧），连续试听=反复拆建。
+    // 现在整个 object 复用一个实例：新会话只 stop() 静音旧会话；release 仅发生在显式 stop() 时。
+    private var player: AudioPlayer? = null
+
+    // 会话计数守卫：被新试听顶替时旧 job 的 finally 不得清掉新会话的 state
+    private var focusSession = 0
+
+    // 本次会话是否已真正出声(合成完毕进入播放)；JS 用它把按钮从…切到■,对齐v9时机
+    @Volatile
+    private var audible: Boolean = false
+
+    // Compose 侧可观察状态：日志面板等 UI 直接收集渲染 ▶/…/■，与 JS 轮询 isPlaying/isAudible 同源
+    private val _state = MutableStateFlow(PreviewState.IDLE)
+    val state: StateFlow<PreviewState> = _state
+
+    private fun toast(context: Context, msg: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(
+                context.applicationContext, msg, android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    /**
+     * [pluginParamsOverride]/[globalParamsOverride]（09-10）：预览调参弹窗的三层草稿覆盖——
+     * 插件/全局层草稿未落库，传入则替代 DB 值/全局提供者参与本次试听的三层乘积，
+     * 使「调滑杆→▶听→再调」不用先点应用即得完整终值效果；不传行为与旧版完全一致。
+     */
+    fun play(
+        context: Context,
+        entity: SystemTtsV2,
+        text: String,
+        pluginParamsOverride: AudioParams? = null,
+        globalParamsOverride: AudioParams? = null,
+    ) {
+        synchronized(lock) {
+            job?.cancel()
+            player?.stop()
+            audible = false
+            _state.value = PreviewState.SYNTHESIZING
+            // 复用播放器（10-05 性能修）：没有才建，新会话不拆旧实例（见 player 字段注释）
+            val audioPlayer = player ?: AudioPlayer(context.applicationContext).also { player = it }
+            focusSession++
+            val session = focusSession
+            job = scope.launch {
+                try {
+                    val resolved = resolveTtsPlayback(
+                        entity,
+                        globalParamsOverride ?: TtsPreviewConfig.globalAudioParamsProvider(),
+                        pluginParamsOverride = pluginParamsOverride,
+                    )
+                    if (resolved == null) {
+                        toast(context, "试听失败：配置项解析失败")
+                        return@launch
+                    }
+                    val provider = CachedEngineManager.getEngine(context.applicationContext, resolved.configuration.source)
+                    if (provider == null) {
+                        toast(context, "试听失败：目标插件未启用或不存在")
+                        return@launch
+                    }
+                    if (provider.state != EngineState.Initialized) provider.onInit()
+
+                    // Local direct-play engines already apply their final parameters themselves.
+                    if (provider.isSyncPlay(resolved.configuration.source)) {
+                        audible = true
+                        _state.value = PreviewState.PLAYING
+                        provider.syncPlay(
+                            resolved.providerParams(text, PREVIEW_TIMEOUT_MS),
+                            resolved.configuration.source,
+                        )
+                        return@launch
+                    }
+
+                    val stream = withTimeout(PREVIEW_TIMEOUT_MS) {
+                        provider.getStream(
+                            resolved.providerParams(text, PREVIEW_TIMEOUT_MS),
+                            resolved.configuration.source,
+                        )
+                    }
+                    val bridgeFormat = (stream as? JsBridgeInputStream)?.streamFormat
+                    val bytes = stream.readBytes()
+                    if (bytes.isEmpty()) {
+                        toast(context, "试听失败：合成返回空音频")
+                        return@launch
+                    }
+
+                    val declaredPcm = bridgeFormat?.encoding?.startsWith("pcm", ignoreCase = true) == true
+                    val local = resolved.localPlaybackParams
+                    val loudnessGain = SpeakerLoudnessManager.infoFor(resolved.configuration).gain
+                    val localVolume = (local.volume * loudnessGain).coerceIn(0f, 1f)
+
+                    val reverbOn = resolved.configuration.audioParams.reverbEnabled
+                    if (resolved.configuration.shouldDecode() && !declaredPcm) {
+                        audible = true
+                        _state.value = PreviewState.PLAYING
+                        if (reverbOn) {
+                            // 试听混响（09-10）：编码音频先解码为 PCM16，再过与正式朗读链同一个
+                            // ReverbAudioProcessor，保证试听与实际播放音色一致
+                            val decodeRate = AudioDecoder.getSampleRateAndMime(bytes).first
+                                .takeIf { it > 0 }
+                                ?: resolved.configuration.audioFormat.sampleRate
+                            val pcm = decodeToPcm(bytes, decodeRate)
+                            audioPlayer.play(
+                                applyReverbToPcm(pcm, decodeRate),
+                                decodeRate, local.speed, localVolume, local.pitch
+                            )
+                        } else {
+                            audioPlayer.play(bytes, local.speed, localVolume, local.pitch)
+                        }
+                    } else {
+                        val sampleRate = if (declaredPcm) {
+                            bridgeFormat!!.sampleRate
+                        } else {
+                            AudioDecoder.getSampleRateAndMime(bytes).first
+                                .takeIf { it > 0 }
+                                ?: resolved.configuration.audioFormat.sampleRate
+                        }
+                        audible = true
+                        _state.value = PreviewState.PLAYING
+                        val out =
+                            if (reverbOn && declaredPcm) applyReverbToPcm(bytes, sampleRate) else bytes
+                        audioPlayer.play(out, sampleRate, local.speed, localVolume, local.pitch)
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    // 合成真超时（10-05 修：它属于 CancellationException 子类，原先被
+                    // 下面的通用取消分支静默吞掉——用户等 30 秒后毫无反馈，像死了一样）。
+                    // 仅当本会话仍是当前会话时才报，被新试听顶替时不打扰
+                    if (synchronized(lock) { focusSession == session }) {
+                        toast(context, "试听失败：合成超时（30 秒）")
+                    }
+                } catch (_: CancellationException) {
+                    // Replacing/stopping a preview is normal.
+                } catch (e: Exception) {
+                    // 被新试听顶替的旧会话被中断时会抛各种 IO/写失败异常（AudioTrack.write 阻塞
+                    // 不响应取消）——此时由新会话接管，保持安静。10-05 播放器改复用后，身份检查
+                    // （player === audioPlayer 恒真）失效，改用会话号：只有仍是当前会话才报错，
+                    // 真实合成错误才不会被吞。
+                    val stillCurrent = synchronized(lock) { focusSession == session }
+                    if (stillCurrent) {
+                        toast(context, "试听失败：${e.message ?: e.javaClass.simpleName}")
+                    }
+                } finally {
+                    // 被新试听顶替时 session 不匹配，由新会话接管，不得清掉新会话的 state
+                    if (focusSession == session) {
+                        _state.value = PreviewState.IDLE
+                    }
+                }
+            }
+        }
+    }
+
+    /** 任意格式音频解码为 PCM16 字节（混响前处理用）；解不出则抛异常由外层 catch 提示 */
+    @OptIn(UnstableApi::class)
+    private suspend fun decodeToPcm(data: ByteArray, sampleRate: Int): ByteArray {
+        val out = ByteArrayOutputStream(data.size)
+        AudioDecoder().doDecode(data, sampleRate) { pcm -> out.write(pcm) }
+        return out.toByteArray()
+    }
+
+    /**
+     * 试听混响（09-10）：复用正式朗读链的 ReverbAudioProcessor（Exo AudioProcessor），
+     * 手动驱动其 queueInput 对整段 PCM16 处理，保证试听与实际播放音色一致。
+     * 按单声道处理（与试听链既有 WAV 封装/AudioTrack 假设一致）；混响尾音在输入末尾截断，预览可接受。
+     */
+    @OptIn(UnstableApi::class)
+    private fun applyReverbToPcm(pcm: ByteArray, sampleRate: Int): ByteArray {
+        return try {
+            val processor = ReverbAudioProcessor()
+            processor.configure(AudioProcessor.AudioFormat(sampleRate, 1, C.ENCODING_PCM_16BIT))
+            val out = ByteArrayOutputStream(pcm.size)
+            val input = ByteBuffer.wrap(pcm)
+            val chunkSize = 4096
+            while (input.hasRemaining()) {
+                val size = minOf(chunkSize, input.remaining())
+                val chunk = ByteArray(size)
+                input.get(chunk)
+                processor.queueInput(ByteBuffer.wrap(chunk))
+                drainProcessorOutput(processor, out)
+            }
+            processor.queueEndOfStream()
+            drainProcessorOutput(processor, out)
+            out.toByteArray()
+        } catch (_: AudioProcessor.UnhandledAudioFormatException) {
+            pcm
+        }
+    }
+
+    private fun drainProcessorOutput(processor: AudioProcessor, out: ByteArrayOutputStream) {
+        val buffer = processor.output
+        if (buffer.hasRemaining()) {
+            val arr = ByteArray(buffer.remaining())
+            buffer.get(arr)
+            out.write(arr)
+        }
+    }
+
+    /**
+     * 点击即置「合成中」（10-05 照 v10 口径：按钮点下立即变「…」，不等 play() 内部置位）。
+     * v10 明写 `btn.setText("…")` 在点击处理里；本项目原靠 play() 异步置 SYNTHESIZING，
+     * 而调用侧要先 withIO 查库才调 play —— 那段空窗 state 仍是旧 IDLE，刚点的行先闪 ▶
+     * 再变 …（「试听状态不准」根因）。点击处先调本方法，UI 立刻反映；play() 会再置一次（幂等）。
+     * 若最终没走到 play（无匹配配置项），调用方须 stop() 复位，别把 state 留在 SYNTHESIZING。
+     */
+    fun markSynthesizing() {
+        synchronized(lock) { _state.value = PreviewState.SYNTHESIZING }
+    }
+
+    fun stop() {
+        synchronized(lock) {
+            job?.cancel()
+            job = null
+            audible = false
+            _state.value = PreviewState.IDLE
+            // 只停不拆（10-05 性能修）：播放器实例常驻复用，避免 stop→play 快速切换时
+            // 反复走 ExoPlayer/AudioTrack 的创建销毁；实例持 applicationContext，无常驻泄漏
+            player?.stop()
+            focusSession++
+        }
+    }
+
+    /** 播放会话是否仍存活(合成中或播放中)；供 JS 侧轮询以在播完后复位按钮。 */
+    fun isPlaying(): Boolean = synchronized(lock) { job?.isActive == true }
+
+    /** 本次会话是否已真正出声(合成完毕进入播放)；供 JS 把按钮从…切到■,对齐v9时机。 */
+    fun isAudible(): Boolean = synchronized(lock) { audible }
+
+    /**
+     * 阻塞等待到真正出声(供JS后台线程同步调用,v9式单线程模型)。
+     * 会话在出声前死亡(合成失败/被停止)→返回false;超时→返回当前状态。
+     */
+    fun awaitAudible(timeoutMs: Long): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (!isPlaying()) return isAudible()
+            if (isAudible()) return true
+            Thread.sleep(100)
+        }
+        return isAudible()
+    }
+
+    /** 阻塞等待会话结束(播完/失败/被停止)；超时返回false。 */
+    fun awaitDone(timeoutMs: Long): Boolean {
+        val start = System.currentTimeMillis()
+        while (isPlaying()) {
+            if (System.currentTimeMillis() - start >= timeoutMs) return false
+            Thread.sleep(100)
+        }
+        return true
+    }
+}

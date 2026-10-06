@@ -1,0 +1,12 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "查看 logcat 日志",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "E:\\TTS\\AndroidSDK\\platform-tools\\adb.exe logcat -s TTS_SERVER:V AndroidRuntime:E *:F",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

@@ -1,0 +1,108 @@
+package com.github.jing332.tts_server_android.conf
+
+import android.content.Context
+import com.funny.data_saver.core.DataSaverConverter.registerTypeConverters
+import com.funny.data_saver.core.DataSaverPreferences
+import com.funny.data_saver.core.mutableDataSaverStateOf
+import com.github.jing332.tts_server_android.R
+import com.github.jing332.tts_server_android.app
+import com.github.jing332.tts_server_android.compose.theme.AppTheme
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+object AppConfig {
+    @OptIn(ExperimentalSerializationApi::class)
+    private val json by lazy {
+        Json {
+            ignoreUnknownKeys = true
+            explicitNulls = false
+            allowStructuredMapKeys = true
+        }
+    }
+
+    init {
+        registerTypeConverters<List<Pair<String, String>>>(
+            save = { json.encodeToString(it) },
+            restore = {
+                val list: List<Pair<String, String>> = try {
+                    json.decodeFromString(it)
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                list
+            }
+        )
+
+        registerTypeConverters<Set<String>>(
+            save = { json.encodeToString(it.toList()) },
+            restore = {
+                try {
+                    json.decodeFromString<List<String>>(it).toSet()
+                } catch (_: Exception) {
+                    emptySet()
+                }
+            }
+        )
+
+        registerTypeConverters(
+            save = { it.id },
+            restore = { value ->
+                AppTheme.values().find { it.id == value } ?: AppTheme.DEFAULT
+            }
+        )
+    }
+
+    private val dataSaverPref by lazy { DataSaverPreferences((app as Context).getSharedPreferences("app", 0)) }
+
+    val theme by lazy { mutableDataSaverStateOf(dataSaverPref, "theme", AppTheme.DEFAULT) }
+    val limitTagLength by lazy { mutableDataSaverStateOf(dataSaverPref, "limitTagLength", 0) }
+    val limitNameLength by lazy { mutableDataSaverStateOf(dataSaverPref, "limitNameLength", 0) }
+    val isSwapListenAndEditButton by lazy { mutableDataSaverStateOf(dataSaverPref, "isSwapListenAndEditButton", false) }
+    // isAutoCheckUpdateEnabled 已删（10-05 用户令：应用内更新功能整体退役）
+    val isExcludeFromRecent by lazy { mutableDataSaverStateOf(dataSaverPref, "isExcludeFromRecent", false) }
+    val isEdgeDnsEnabled by lazy { mutableDataSaverStateOf(dataSaverPref, "isEdgeDnsEnabled", true) }
+    val testSampleText by lazy { mutableDataSaverStateOf(dataSaverPref, "testSampleText", "单击右侧按钮即可测试并播放这段音频。") }
+
+    // 本地音效专用试听文本（用户 09-13：与全局 testSampleText 分离，互不影响）——
+    // 音效插件按文本正则取音效，全局句匹配不上；单独一份可填音效名直接试听
+    val localSoundSampleText by lazy { mutableDataSaverStateOf(dataSaverPref, "localSoundSampleText", "你好，这是试听语音。") }
+    val fragmentIndex by lazy { mutableDataSaverStateOf(dataSaverPref, "fragmentIndex", 0) }
+    // spinnerMaxDropDownCount 已删（10-05 用户令「下拉框内容最大数」为假开关：全仓无消费点，
+    // AppSpinner 用 lib-compose 的 ComposeWidgetSettings.maxDropDownCount=3，两处从未接线）
+    val lastReadHelpDocumentVersion by lazy { mutableDataSaverStateOf(dataSaverPref, "lastReadHelpDocumentVersion", 0) }
+    val webDavUrl by lazy { mutableDataSaverStateOf(dataSaverPref, "webDavUrl", DEFAULT_WEBDAV_URL) }
+    val webDavUser by lazy { mutableDataSaverStateOf(dataSaverPref, "webDavUser", "") }
+    val webDavPass by lazy { mutableDataSaverStateOf(dataSaverPref, "webDavPass", "") }
+    val webDavPath by lazy { mutableDataSaverStateOf(dataSaverPref, "webDavPath", "TTS备份") }
+
+    // 本地备份文件夹（10-03 用户令）：SAF 目录树 URI，选定后本地备份直写该目录、
+    // 不再每次弹「另存为」。空 = 未设置（备份时仍走系统另存为流程）。
+    // FilePickerActivity 选目录时已 takePersistableUriPermission，重启后权限仍有效
+    val backupDirUri by lazy { mutableDataSaverStateOf(dataSaverPref, "backupDirUri", "") }
+    // 上者的显示名快照（选定时算好存下来，避免每次渲染做 SAF 查询）
+    val backupDirLabel by lazy { mutableDataSaverStateOf(dataSaverPref, "backupDirLabel", "") }
+
+    const val DEFAULT_WEBDAV_URL = "https://dav.jianguoyun.com/dav/"
+
+    /** 未配置 = 地址为默认(或空)且未填账号：仅预填默认地址不代表可用 */
+    val isWebDavConfigured: Boolean
+        get() = webDavUrl.value.trim().let { url ->
+            url.isNotBlank() && (url != DEFAULT_WEBDAV_URL || webDavUser.value.isNotBlank())
+        }
+    val expandedSubGroups by lazy { mutableDataSaverStateOf(dataSaverPref, "expandedSubGroups", emptySet<String>()) }
+
+    // 大分组展开状态：轻量集合（存 String id 复用 Set<String> 转换器）。
+    // 不再写分组表 isExpanded 列——写库会触发 Room 全量重发，导致展开/折叠时
+    // 分池判定与全部分组树重建（大分组数千项时明显卡顿）。旧值启动时迁移进来
+    val expandedGroupIds by lazy { mutableDataSaverStateOf(dataSaverPref, "expandedGroupIds", emptySet<String>()) }
+    // 规则外标签显示名修复标记：旧版曾把规则外标签显示名经 JS 兜底误写成「旁白」，升级后首启强制重算一次
+    val tagNameUnknownRepairDone by lazy { mutableDataSaverStateOf(dataSaverPref, "tagNameUnknownRepairDone", false) }
+
+    // tagName 一次性迁移标记：首次进入列表时用 getTagName 重算所有 tagName 并清理废弃 personality 字段
+    val tagNameMigrated by lazy { mutableDataSaverStateOf(dataSaverPref, "tagNameMigrated", false) }
+
+    // 单条音频参数折叠迁移标记：旧版编辑页滑块写 source.* 而 audioParams 才是生效层，
+    // 两者并存造成卡片/日志显示分裂（如滑块0.9、日志1.15）。折叠后滑块唯一写 audioParams
+    val audioParamsCollapsed by lazy { mutableDataSaverStateOf(dataSaverPref, "audioParamsCollapsed", false) }
+}

@@ -1,0 +1,45 @@
+pluginManagement {
+    includeBuild("build-logic")
+    repositories {
+        // CI 环境 (如 GitHub Actions) 直接用官方仓库, 避免阿里云镜像同步不完整导致解析失败
+        // 本地开发优先用阿里云镜像加速
+        if (!(System.getenv('CI') == 'true' || System.getenv('GITHUB_ACTIONS') == 'true')) {
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+        }
+        google()
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        if (!(System.getenv('CI') == 'true' || System.getenv('GITHUB_ACTIONS') == 'true')) {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+            maven { url 'https://maven.aliyun.com/repository/central' }
+        }
+        google()
+        mavenCentral()
+        maven { url 'https://www.jitpack.io' }
+    }
+
+    versionCatalogs {
+        libs {
+            from(files("./libs.versions.toml"))
+        }
+    }
+}
+
+rootProject.name = "TTS Server"
+include ':app'
+include ':lib-common'
+include ':lib-compose'
+include ':lib-database'
+include ':lib-tts'
+include ':lib-script'
+include ':lib-server'
+include ':app-proxy'

@@ -1,0 +1,102 @@
+name: Build Release
+
+on:
+  # 推送 1.26.* 格式 tag 自动打包正式版 (只打 app, 不含 dev)
+  push:
+  #  tags:
+  #    - '1.26.*'
+  # 手动触发仍可用, 可选同时构建 dev 共存版
+  workflow_dispatch:
+    inputs:
+      build_dev:
+        description: "同时构建 dev 共存版 (默认同时构建 app 和 dev)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # 动态生成: build_dev=true 时为 ["app","dev"], 否则只 ["app"]
+        product: ${{ fromJSON(format('["app"{0}]', github.event.inputs.build_dev == 'true' && ',"dev"' || '')) }}
+
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      product: ${{ matrix.product }}
+      outputs_dir: "${{ github.workspace }}/app/build/outputs"
+      ver_name: ""
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Init Signature
+        run: |
+          touch local.properties
+          echo ALIAS_NAME='${{ secrets.ANDROID_KEY_ALIAS }}' >> local.properties
+          echo ALIAS_PASSWORD='${{ secrets.ANDROID_KEY_PASSWORD }}' >> local.properties
+          echo KEY_PASSWORD='${{ secrets.ANDROID_STORE_PASSWORD }}' >> local.properties
+          echo KEY_PATH='./key.jks' >> local.properties
+          # 校验 Secrets 是否已配置 (空 KEY_STORE 会让签名 task 跑 14 分钟才失败)
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "::error::Secret KEY_STORE 未配置, 请到 Settings > Secrets > Actions 添加 key.jks 的 Base64 编码"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ANDROID_KEY_ALIAS }}" ] || [ -z "${{ secrets.ANDROID_KEY_PASSWORD }}" ] || [ -z "${{ secrets.ANDROID_STORE_PASSWORD }}" ]; then
+            echo "::error::签名 Secrets (ALIAS_NAME/ALIAS_PASSWORD/KEY_PASSWORD) 未完整配置"
+            exit 1
+          fi
+          # 从Secrets读取Base64并解码为 key.jks (用 printf 避免 echo 末尾换行污染二进制)
+          printf '%s' '${{ secrets.ANDROID_KEYSTORE_BASE64 }}' | base64 --decode > $GITHUB_WORKSPACE/app/key.jks
+          # 校验解码后的文件非空且是 Java KeyStore
+          file $GITHUB_WORKSPACE/app/key.jks
+          ls -l $GITHUB_WORKSPACE/app/key.jks
+          if [ ! -s $GITHUB_WORKSPACE/app/key.jks ]; then
+            echo "::error::解码后的 key.jks 为空文件, 请检查 KEY_STORE Base64 是否正确"
+            exit 1
+          fi
+          # 提前验证 keystore 可读 (格式/别名/密码错误立即失败, 省下十几分钟构建)
+          keytool -list -keystore $GITHUB_WORKSPACE/app/key.jks -storetype JKS \
+            -storepass '${{ secrets.ANDROID_STORE_PASSWORD }}' -alias '${{ secrets.ANDROID_KEY_ALIAS }}' > /dev/null \
+            || { echo "::error::keystore 读取失败: 请核对 KEY_STORE / KEY_PASSWORD / ALIAS_NAME"; exit 1; }
+
+      - name: Build with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew assemble${{ env.product }}release --build-cache --parallel --daemon --warning-mode all
+
+      - name: Init environment variable
+        run: |
+          echo "ver_name=$(grep -m 1 'versionName' ${{ env.outputs_dir }}/apk/${{ env.product }}/release/output-metadata.json | cut -d\" -f4)" >> $GITHUB_ENV
+
+      - name: Save version name
+        run: echo "${{ env.ver_name }}" > ver_name_${{ env.product }}.txt
+
+      - name: Upload Mappings to Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mappings_${{ env.product }}_${{ env.ver_name }}
+          path: ${{ env.outputs_dir }}/mapping/*/*.txt
+          # 短保留兜底: artifact 仅作 job 间中转, 发布完即删, 防止占满存储配额
+          retention-days: 1
+
+      - name: Upload APK To Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "T2S-Server_${{ env.product }}_${{ env.ver_name }}"
+          path: |
+            ${{env.outputs_dir}}/apk/${{ env.product }}/release/*.apk
+            ver_name_${{ env.product }}.txt
+          retention-days: 1

@@ -1,0 +1,316 @@
+package com.github.jing332.tts.speech.plugin.engine
+
+import android.content.Context
+import android.util.Log
+import androidx.annotation.Keep
+import com.github.jing332.database.dbm
+import com.github.jing332.database.entities.SpeechRule
+import com.github.jing332.database.entities.systts.TtsConfigurationDTO
+import com.github.jing332.database.entities.systts.source.PluginTtsSource
+import com.github.jing332.script.annotation.ScriptInterface
+import com.github.jing332.script.simple.SimpleScriptEngine
+import com.github.jing332.script.simple.ext.JsExtensions
+import com.github.jing332.script.source.StringScriptSource
+import com.github.jing332.tts.CachedEngineManager
+import com.github.jing332.tts.TaggedTtsPreviewPlayer
+import org.json.JSONArray
+
+/**
+ * @param tts 在JS中用 `ttsrv.tts` 访问
+ */
+@Keep
+data class TtsEngineContext(
+    var tts: PluginTtsSource,
+    val userVars: Map<String, String> = mutableMapOf(),
+    override val context: Context,
+    override val engineId: String
+) : JsExtensions(context, engineId) {
+
+    companion object {
+        private const val TAG = "TtsEngineContext"
+    }
+
+    /** 引擎层注入的 JS 回调通道（TtsPluginEngineV2 创建后注入）：(PluginJS 函数名, 参数列表)。
+     *  通用换声弹窗桥（showVoicePickerDialog）用它把弹窗内变化回喊插件 JS；非构造属性，
+     *  不参与 data class equals/hashCode */
+    var jsInvoker: ((String, List<Any?>) -> Unit)? = null
+
+    /**
+     * 通用换声弹窗桥（用户 09-13「完全同源」定稿）：请求弹出 app 端与日志快捷面板**同款**的
+     * 「更换发音人 + 音频参数」Compose 弹窗（VoicePickerDialog）。
+     *
+     * 请求进 [VoicePickerBus]，由挂在插件 UI 宿主组合（PluginTtsUI.EditContentScreen）的
+     * 观察者真正渲染弹窗（Compose 弹窗必须长在组合里，桥只投递请求）。
+     *
+     * 弹窗内变化经 [VoicePickerBus.notifyMutated] 回喊 [callbackName]（PluginJS 上的函数，
+     * 主线程执行）：换声落库→{"event":"applied","tag":..}、删除配置项→{"event":"deleted",..}、
+     * 标记变化→{"event":"marked",..}。插件收到后刷新自己的角色列表即可（换声本身已由
+     * 弹窗内部写 characterRecords.json + gengxin.json，与角色管理插件同文件同字段）。
+     *
+     * @param optionsJson {"bindingKey":"角色名","anchorTag":"女青年01","title":"更换发音人"}
+     *        bindingKey 空=非绑定模式（与日志面板分支同语义）；anchorTag=角色当前绑定 tag
+     * @param callbackName PluginJS 对象上的回调函数名
+     */
+    @ScriptInterface
+    fun showVoicePickerDialog(optionsJson: String, callbackName: String) {
+        try {
+            val o = org.json.JSONObject(optionsJson)
+            VoicePickerBus.submit(
+                VoicePickerRequest(
+                    bindingKey = o.optString("bindingKey"),
+                    anchorTag = o.optString("anchorTag"),
+                    title = o.optString("title").ifBlank { "更换发音人" },
+                ),
+                jsInvoker, callbackName,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "showVoicePickerDialog failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 通过标签(tag)试听绑定的TTS配置项，由 app 统一播放。
+     *
+     * 匹配顺序：speechRule.tag → source.voice → displayName → tagName
+     * 仅查找 tagRuleId == 当前插件ID 的配置项，跳过当前插件自身的配置项（避免死锁）。
+     *
+     * 播放走 app 侧统一试听链（三层最终参数 + 插件/本机路由 + 解码/PCM/响度），
+     * 与正式朗读及配置页试听完全同速同量；插件 JS 不再拿音频文件自播。
+     *
+     * @param tag 标签名(如"男主1")或发音人名
+     * @param text 试听文本
+     * @return true=已开始播放；false=未匹配到配置项
+     */
+    @ScriptInterface
+    fun playTtsByTag(tag: String, text: String): Boolean {
+        return try {
+            val trimmedTag = tag.trim()
+            if (trimmedTag.isEmpty()) return false
+
+            val match = findConfigByTag(dbm.systemTtsV2.allEnabled, trimmedTag) ?: return false
+            val source = (match.config as TtsConfigurationDTO).source
+            if (source is PluginTtsSource && source.pluginId == engineId) return false
+
+            TaggedTtsPreviewPlayer.play(context, match, text)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "playTtsByTag failed: ${e.message}")
+            false
+        }
+    }
+
+    /** 停止 playTtsByTag 发起的试听（用户再次点击同一试听按钮时调用）。 */
+    @ScriptInterface
+    fun stopTtsPreview() {
+        TaggedTtsPreviewPlayer.stop()
+    }
+
+    /** 试听是否仍在进行(合成中或播放中)；JS 轮询以在播完后复位按钮。 */
+    @ScriptInterface
+    fun isTtsPreviewPlaying(): Boolean = TaggedTtsPreviewPlayer.isPlaying()
+
+    /** 本次试听是否已真正出声(合成完毕进入播放)；JS 轮询到 true 才把…切成■,对齐v9时机。 */
+    @ScriptInterface
+    fun isTtsPreviewAudible(): Boolean = TaggedTtsPreviewPlayer.isAudible()
+
+    /** 阻塞等待出声(供JS后台线程同步调用)；出声前会话死亡返回false。 */
+    @ScriptInterface
+    fun awaitTtsPreviewAudible(timeoutMs: Long): Boolean =
+        TaggedTtsPreviewPlayer.awaitAudible(timeoutMs)
+
+    /** 阻塞等待试听结束(播完/失败/被停止)；超时返回false。 */
+    @ScriptInterface
+    fun awaitTtsPreviewDone(timeoutMs: Long): Boolean =
+        TaggedTtsPreviewPlayer.awaitDone(timeoutMs)
+
+    /**
+     * 通过标签(tag)查找当前已启用的TTS配置项的发音人显示名。
+     *
+     * 用于切换分组后实时获取实际生效的发音人名称，替代静态存储的 record.voice。
+     * 匹配逻辑与 playTtsByTag 一致，仅查找 tagRuleId == engineId 且已启用的配置项。
+     *
+     * @param tag 标签名(如"男主1")或发音人名
+     * @return 配置项的 displayName，未匹配返回 null
+     */
+    @ScriptInterface
+    fun getVoiceByTag(tag: String): String? {
+        return try {
+            val trimmedTag = tag.trim()
+            if (trimmedTag.isEmpty()) return null
+
+            val allEnabled = dbm.systemTtsV2.allEnabled
+            val match = findConfigByTag(allEnabled, trimmedTag) ?: return null
+
+            // getVoiceByTag 仅查询 displayName，不调用引擎获取音频，无需死锁保护
+            // （playTtsByTag 才需要跳过当前插件自身避免死锁）
+            match.displayName
+        } catch (e: Exception) {
+            Log.w(TAG, "getVoiceByTag failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 批量查询多个 tag 对应的发音人显示名。
+     *
+     * 一次 DB 查询（allEnabled）即可解析全部 tag，避免 JS 侧逐个调用 getVoiceByTag
+     * 造成 N 次跨进程 DB 往返（角色管理列表/筛选弹窗打开慢的根因）。
+     *
+     * @param tagsJson JSON 数组字符串，如 ["女青年01","男青年02"]
+     * @return JSON 对象字符串，key=原始tag，value=displayName（未匹配的 tag 不含在此对象中），
+     *         如 {"女青年01":"晓晓"}；异常返回 "{}"
+     */
+    @ScriptInterface
+    fun getVoiceNamesByTags(tagsJson: String): String {
+        return try {
+            val arr = JSONArray(tagsJson)
+            val tags = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val t = arr.optString(i).trim()
+                if (t.isNotEmpty()) tags.add(t)
+            }
+            if (tags.isEmpty()) return "{}"
+
+            // 一次 DB 查询拿到全部已启用配置项
+            val allEnabled = dbm.systemTtsV2.allEnabled
+            val result = org.json.JSONObject()
+            for (tag in tags) {
+                val match = findConfigByTag(allEnabled, tag)
+                if (match != null) result.put(tag, match.displayName)
+            }
+            result.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "getVoiceNamesByTags failed: ${e.message}")
+            "{}"
+        }
+    }
+
+    /**
+     * 获取所有朗读规则列表（供 JS 插件选择并运行规则）。
+     *
+     * 返回 JSON 数组字符串，每项为 {"name": <规则名>, "ruleId": <规则内的id>}。
+     * JS 侧解析后弹出原生列表让用户选择，再调用 [runSpeechRule] 运行选中的规则。
+     *
+     * 使用 getAllWithoutCode() 避免加载大 code 字段导致 Cursor 窗口溢出闪退。
+     * ruleId 是规则 js 内部的 id（String，如 "mingwuyan"），决定文件写入目录，
+     * 同时作为 [runSpeechRule] 的入参（String 类型，避免 Long→Int 溢出）。
+     */
+    @ScriptInterface
+    fun getSpeechRuleList(): String {
+        val arr = JSONArray()
+        dbm.speechRuleDao.getAllWithoutCode().forEach { rule ->
+            val obj = org.json.JSONObject()
+            obj.put("name", rule.name)
+            obj.put("ruleId", rule.ruleId)
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
+    /**
+     * 同步运行指定的朗读规则（仅 eval 规则顶层代码，让规则的自动执行逻辑跑一遍，
+     * 从而更新发音人/标签等本地文件）。与朗读规则编辑界面"运行键"的 eval 阶段等价。
+     *
+     * 朗读规则顶层代码通常会在 eval 时自动读取书籍/角色数据并写出 fayinren.json、
+     * characterRecords.json 等文件——
+     * 只要规则的 ruleId 与当前插件的 engineId 相同，文件就写入同一目录，
+     * 当前插件随后即可读到更新后的数据。
+     *
+     * @param ruleId 朗读规则内部 id（[getSpeechRuleList] 返回的 ruleId 字段）
+     * @return 成功返回 null；失败返回错误信息字符串
+     */
+    @ScriptInterface
+    fun runSpeechRule(ruleId: String): String? {
+        return try {
+            val rule = dbm.speechRuleDao.getByRuleIdAll(ruleId)
+                ?: return "未找到 ruleId=$ruleId 的朗读规则"
+            // 复刻 SpeechRuleEngine.eval()：用 ruleId 作为 engineId，保证文件写入目录与规则一致
+            val engine = SimpleScriptEngine(context, rule.ruleId)
+            engine.execute(StringScriptSource(rule.code, sourceName = rule.ruleId))
+            null
+        } catch (e: Throwable) {
+            Log.w(TAG, "runSpeechRule failed: ${e.message}")
+            e.message ?: e.toString()
+        }
+    }
+
+    /**
+     * 查找匹配 tag 的已启用配置项（四级匹配，与 playTtsByTag 共用）
+     */
+    private fun findConfigByTag(
+        allEnabled: List<com.github.jing332.database.entities.systts.SystemTtsV2>,
+        trimmedTag: String
+    ): com.github.jing332.database.entities.systts.SystemTtsV2? {
+        return allEnabled.firstOrNull {
+            val config = it.config as? TtsConfigurationDTO ?: return@firstOrNull false
+            config.speechRule.tagRuleId == engineId && config.speechRule.tag == trimmedTag
+        } ?: allEnabled.firstOrNull {
+            val config = it.config as? TtsConfigurationDTO ?: return@firstOrNull false
+            config.speechRule.tagRuleId == engineId && config.source.voice == trimmedTag
+        } ?: allEnabled.firstOrNull {
+            val config = it.config as? TtsConfigurationDTO ?: return@firstOrNull false
+            config.speechRule.tagRuleId == engineId && it.displayName == trimmedTag
+        } ?: allEnabled.firstOrNull {
+            val config = it.config as? TtsConfigurationDTO ?: return@firstOrNull false
+            config.speechRule.tagRuleId == engineId && config.speechRule.tagName.contains(trimmedTag)
+        }
+    }
+
+    /**
+     * 删除匹配 tag 的已启用配置项。
+     *
+     * 用于用户在角色管理里试听后觉得质量不达标，当场删除该发音人配置项。
+     * 仅删除 tagRuleId == 当前插件ID 的配置项，避免误删其他规则管理的配置项。
+     *
+     * @param tag 标签名(如"女青年01")
+     * @return 成功返回 null；失败返回错误信息字符串；未匹配返回 "未找到配置项"
+     */
+    @ScriptInterface
+    fun deleteConfigByTag(tag: String): String? {
+        return try {
+            val trimmedTag = tag.trim()
+            if (trimmedTag.isEmpty()) return "tag为空"
+
+            val allEnabled = dbm.systemTtsV2.allEnabled
+            val match = findConfigByTag(allEnabled, trimmedTag) ?: return "未找到配置项"
+
+            dbm.systemTtsV2.delete(match)
+            // 清理引擎缓存，避免下次合成时拿到已删除的引擎
+            CachedEngineManager.removeEngine((match.config as TtsConfigurationDTO).source)
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "deleteConfigByTag failed: ${e.message}")
+            e.message ?: e.toString()
+        }
+    }
+
+    /**
+     * 修改匹配 tag 的已启用配置项的 displayName。
+     *
+     * 用于用户在角色管理里修改发音人显示名（如把"晓晓"改成"晓晓-温柔版"）。
+     * 仅修改 tagRuleId == 当前插件ID 的配置项。
+     *
+     * @param tag 标签名(如"女青年01")
+     * @param newName 新的显示名
+     * @return 成功返回 null；失败返回错误信息字符串；未匹配返回 "未找到配置项"
+     */
+    @ScriptInterface
+    fun updateConfigDisplayName(tag: String, newName: String): String? {
+        return try {
+            val trimmedTag = tag.trim()
+            if (trimmedTag.isEmpty()) return "tag为空"
+            val trimmedName = newName.trim()
+            if (trimmedName.isEmpty()) return "新名称为空"
+
+            val allEnabled = dbm.systemTtsV2.allEnabled
+            val match = findConfigByTag(allEnabled, trimmedTag) ?: return "未找到配置项"
+
+            match.displayName = trimmedName
+            dbm.systemTtsV2.update(match)
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "updateConfigDisplayName failed: ${e.message}")
+            e.message ?: e.toString()
+        }
+    }
+}

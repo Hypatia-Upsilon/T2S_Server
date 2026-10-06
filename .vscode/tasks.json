@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "查看已连接设备 (adb devices)",
+            "type": "shell",
+            "command": "E:\\TTS\\AndroidSDK\\platform-tools\\adb.exe devices",
+            "problemMatcher": []
+        },
+        {
+            "label": "查看应用日志 (adb logcat)",
+            "type": "shell",
+            "command": "E:\\TTS\\AndroidSDK\\platform-tools\\adb.exe logcat -s TTS_SERVER:V AndroidRuntime:E *:F",
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "安装 APK 到真机 (app debug)",
+            "type": "shell",
+            "command": "E:\\TTS\\AndroidSDK\\platform-tools\\adb.exe install -r app\\build\\outputs\\apk\\app\\debug\\*.apk",
+            "problemMatcher": []
+        },
+        {
+            "label": "安装 APK 到真机 (dev 共存版 debug)",
+            "type": "shell",
+            "command": "E:\\TTS\\AndroidSDK\\platform-tools\\adb.exe install -r app\\build\\outputs\\apk\\dev\\debug\\*.apk",
+            "problemMatcher": []
+        }
+    ]
+}

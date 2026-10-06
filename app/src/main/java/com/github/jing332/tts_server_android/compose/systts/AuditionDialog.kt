@@ -1,0 +1,379 @@
+package com.github.jing332.tts_server_android.compose.systts
+
+import android.content.Context
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.NavigateBefore
+import androidx.compose.material.icons.automirrored.filled.NavigateNext
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.drake.net.utils.withMain
+import com.github.jing332.common.audio.AudioPlayer
+import com.github.jing332.common.utils.messageChain
+import com.github.jing332.common.utils.toParamText
+import com.github.jing332.common.utils.sizeToReadable
+import com.github.jing332.compose.widgets.AppDialog
+import com.github.jing332.compose.widgets.LoadingContent
+import com.github.jing332.database.entities.systts.AudioParams
+import com.github.jing332.database.entities.systts.SystemTtsV2
+import com.github.jing332.database.entities.systts.TtsConfigurationDTO
+import com.github.jing332.database.entities.systts.source.TextToSpeechSource
+import com.github.jing332.tts.CachedEngineManager
+import com.github.jing332.tts.localPlaybackParamsFor
+import com.github.jing332.tts.resolveTtsPlayback
+import com.github.jing332.tts.loudness.SpeakerLoudnessManager
+import com.github.jing332.tts.speech.EngineState
+import com.github.jing332.tts.speech.TextToSpeechProvider
+import com.github.jing332.tts.speech.plugin.engine.JsBridgeInputStream
+import com.github.jing332.tts.synthesizer.SystemParams
+import com.github.jing332.tts.synthesizer.TtsConfiguration
+import com.github.jing332.tts.synthesizer.TtsConfiguration.Companion.toVO
+import com.github.jing332.tts_server_android.R
+import com.github.jing332.tts_server_android.conf.AppConfig
+import com.github.jing332.tts_server_android.conf.SysTtsConfig
+import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okio.IOException
+import splitties.init.appCtx
+
+
+private val logger = KotlinLogging.logger("AuditionDialog")
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun AuditionDialog(
+    systts: SystemTtsV2,
+    text: String = AppConfig.testSampleText.value,
+
+    // 草稿覆盖（用户 09-17：音频参数滑杆调完即听，不必先应用）：配置层由调用方把草稿拼进
+    // [systts]（withAudioParams），插件/全局两层由这两个 override 带入（null=读库值）。
+    // 须位于 [config] 之前——config 的默认值表达式要引用它们，保证「终值行显示」与
+    // 「给引擎的合成参数」两处读到同一套草稿。
+    pluginParamsOverride: AudioParams? = null,
+    globalParamsOverride: AudioParams? = null,
+
+    // 与实际朗读同源：三层叠加(插件×配置×全局)并共享插件/本机参数路由，
+    // 试听听到的即为真实播放效果，分组/子分组仅组织列表、不参与倍率。
+    config: TtsConfiguration = resolveTtsPlayback(
+        systts,
+        globalParamsOverride ?: AudioParams(
+            speed = SysTtsConfig.audioParamsSpeed,
+            volume = SysTtsConfig.audioParamsVolume,
+            pitch = SysTtsConfig.audioParamsPitch
+        ),
+        pluginParamsOverride = pluginParamsOverride,
+    )?.configuration ?: (systts.config as TtsConfigurationDTO).toVO(),
+    engine: TextToSpeechProvider<TextToSpeechSource>? = null,
+    voiceId: Any? = null,
+    autoDismiss: Boolean = true,
+    hasPrev: Boolean = false,
+    hasNext: Boolean = false,
+    onCategoryAssigned: ((voiceId: Any, categoryName: String?) -> Unit)? = null,
+    onPrev: (() -> Unit)? = null,
+    onNext: (() -> Unit)? = null,
+    // 当前声音已分配的分类（回看时显示，重选分类即覆盖改派）
+    assignedCategory: String? = null,
+    // 进度序号，如 "12/50"
+    progressText: String? = null,
+    onDismissRequest: () -> Unit,
+) {
+    val context = LocalContext.current
+    var error by remember { mutableStateOf("") }
+    var info by remember { mutableStateOf("") }
+    val audioPlayer = remember { AudioPlayer(context) }
+
+    DisposableEffect(systts) {
+        onDispose {
+            audioPlayer.stop()
+        }
+    }
+
+    // 弹窗出现即后台预热引擎，缩短首次播放出声延迟（静默，不输出日志）
+    LaunchedEffect(systts) {
+        launch(Dispatchers.IO) {
+            runCatching {
+                val e = engine ?: CachedEngineManager.getEngine(appCtx, config.source) ?: return@runCatching
+                // !Initialized(含预热中 Initializing):挂起等待完成,保证预热协程结束时引擎必然就绪
+                if (e.state != EngineState.Initialized) e.onInit()
+            }
+        }
+    }
+
+    LaunchedEffect(systts) {
+        error = ""
+        info = ""
+        launch(Dispatchers.IO) {
+            try {
+                val e = engine ?: CachedEngineManager.getEngine(appCtx, config.source)
+                ?: throw IllegalStateException("engine is null")
+
+                // 必须用 !Initialized 判定:预热协程可能正把 state 置为 Initializing,
+                // 旧写法 is Uninitialized 会跳过等待直接 getStream,撞上 mEngine 未就绪
+                // 抛 "Engine not initialized"(首次导入即试听必现,第二次才成功)
+                if (e.state != EngineState.Initialized) e.onInit()
+                val resolvedProviderParams = resolveTtsPlayback(
+                    systts,
+                    // 与 config 默认值同源：草稿 override 带入，引擎合成参数跟终值行显示一致
+                    globalParamsOverride ?: AudioParams(
+                        speed = SysTtsConfig.audioParamsSpeed,
+                        volume = SysTtsConfig.audioParamsVolume,
+                        pitch = SysTtsConfig.audioParamsPitch
+                    ),
+                    pluginParamsOverride = pluginParamsOverride,
+                )?.providerParams(text, SysTtsConfig.requestTimeout.toLong()) ?: SystemParams(
+                    text = text,
+                    speed = config.audioParams.speed,
+                    volume = config.audioParams.volume,
+                    pitch = config.audioParams.pitch,
+                    requestTimeout = SysTtsConfig.requestTimeout.toLong()
+                )
+                if (e.isSyncPlay(config.source)) {
+                    e.syncPlay(
+                        resolvedProviderParams,
+                        config.source
+                    )
+                } else {
+                    val stream = e.getStream(
+                        resolvedProviderParams,
+                        config.source
+                    )
+                    // 插件桥接流可能在 streamStart 声明裸 PCM(与 isNeedDecode 配置矛盾),
+                    // 格式声明读流前后都可取,但必须在 readBytes 之外单独引用
+                    val bridgePcmFormat = (stream as? JsBridgeInputStream)?.streamFormat
+                    val audio = stream.readBytes()
+                    val declaredPcm =
+                        bridgePcmFormat?.encoding?.startsWith("pcm", ignoreCase = true) == true
+                    // 裸 PCM 无容器头,getSampleRateAndMime 探测结果为空,直接用 streamStart 声明值展示
+                    val rateAndMime = if (declaredPcm)
+                        Pair(bridgePcmFormat!!.sampleRate, "pcm")
+                    else
+                        com.github.jing332.common.audio.AudioDecoder.getSampleRateAndMime(audio)
+                    withMain {
+                        // 与日志/音频参数弹窗一致的最终倍率展示(仅≠1的项)：试听时明确知道当前生效的叠加参数
+                        // 用户 09-10 定稿：去掉值后缀 x；项间改全角逗号（与日志发音人信息同款，
+                        // 原空格分隔在多项连排时易看成一项）；值按实际精度（1.00→1.0、0.97→0.97）
+                        // 用户 09-15 晚：本弹窗内跟「音频大小: 」等同款格式——标签后半角冒号+空格
+                        //（仅此弹窗，日志行/音频参数弹窗的「语速1.45」连排口径不动）
+                        val p = config.audioParams
+                        val paramsInfo = buildList {
+                            if (kotlin.math.abs(p.speed - 1f) > 0.005f) add("语速: ${p.speed.toParamText()}")
+                            if (kotlin.math.abs(p.volume - 1f) > 0.005f) add("音量: ${p.volume.toParamText()}")
+                            if (kotlin.math.abs(p.pitch - 1f) > 0.005f) add("音高: ${p.pitch.toParamText()}")
+                        }.joinToString("，")
+                        info = context.getString(
+                            R.string.systts_test_success_info, audio.size.toLong().sizeToReadable(),
+                            rateAndMime.first, rateAndMime.second
+                        ) + if (paramsInfo.isNotEmpty()) "\n$paramsInfo" else ""
+                    }
+
+                    // Same app-side routing as DefaultResultProcessor: providers that own a
+                    // dimension receive it during synthesis; all remaining plugin dimensions are
+                    // applied once here. Local engines already applied their final values.
+                    val localParams = localPlaybackParamsFor(config)
+                    val loudnessGain = SpeakerLoudnessManager.infoFor(config).gain
+                    val localVolume = (localParams.volume * loudnessGain).coerceIn(0f, 1f)
+
+                    if (config.shouldDecode() && !declaredPcm)
+                        audioPlayer.play(audio, localParams.speed, localVolume, localParams.pitch)
+                    else
+                        // 裸 PCM(声明或配置):AudioPlayer 会按采样率包 WAV 头/直通 AudioTrack
+                        audioPlayer.play(
+                            audio,
+                            if (declaredPcm) bridgePcmFormat!!.sampleRate else config.audioFormat.sampleRate,
+                            localParams.speed, localVolume, localParams.pitch
+                        )
+                }
+                withContext(Dispatchers.Main) {
+                    if (autoDismiss) onDismissRequest()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 弹窗关闭/切换时协程被取消，属正常行为，忽略
+            } catch (e: IOException) {
+                error = e.cause.toString()
+            } catch (e: Exception) {
+                error = e.messageChain
+                logger.warn { e.stackTraceToString() }
+            }
+        }
+    }
+
+    AppDialog(
+        onDismissRequest = onDismissRequest,
+        // 退出键形态（目目 09-18 拍板方案①）：批量分类态=标题行「关闭」文字键——
+        // 图标 ✕ 实机太不显眼（24/28dp 都试过），文字键直白且顶部锚定零溢出风险
+        // （三枚键同排塞底部历史失败：内容宽 ~264dp 塞不下，末尾被挤成竖排）；
+        // 单条试听态底部本就有「关闭」，标题行不再重复放退出键
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    stringResource(id = R.string.audition),
+                    modifier = Modifier.weight(1f)
+                )
+                if (onPrev != null || onNext != null) {
+                    TextButton(onClick = onDismissRequest) {
+                        Text(stringResource(id = R.string.close))
+                    }
+                }
+            }
+        },
+        content = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                // 当前试听的声音名：分类时明确知道在给哪个发音人分配
+                if (systts.displayName.isNotBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = if (assignedCategory.isNullOrBlank()) 6.dp else 2.dp)
+                    ) {
+                        Text(
+                            systts.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        // 进度序号：批量试听分类时知道进行到第几个
+                        if (!progressText.isNullOrBlank()) {
+                            Text(
+                                progressText,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    // 已分配的分类回显：回看上一个声音时知道是否已设置过
+                    if (!assignedCategory.isNullOrBlank()) {
+                        Text(
+                            buildString {
+                                append("分类：$assignedCategory")
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                }
+
+                // 仅失败时显示错误；正常试听不显示测试文本（文本本身仍用于合成）
+                if (error.isNotEmpty()) {
+                    SelectionContainer {
+                        Text(
+                            error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                if (error.isEmpty())
+                    LoadingContent(
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .fillMaxWidth(),
+                        isLoading = info.isEmpty()
+                    ) {
+                        SelectionContainer {
+                            Text(info, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+
+                // —— 分配分类：女性列 / 男性列 / 主角特殊旁白列 三列竖向排开，点击已选中的标签即取消（传 null） ——
+                if (onCategoryAssigned != null && voiceId != null && error.isEmpty()) {
+                    Text(
+                        stringResource(id = R.string.assign_category_hint),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 12.dp)
+                    )
+                    // 三列布局：女性组、男性组、主角特殊旁白组，每列内部竖向堆叠标签，互不混排
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        com.github.jing332.compose.widgets.VoiceCategories.COLUMNS.forEach { column ->
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                column.forEach { category ->
+                                    FilterChip(
+                                        selected = category == assignedCategory,
+                                        // 再次点击已选中的分类 = 取消分配（传 null）
+                                        onClick = {
+                                            onCategoryAssigned.invoke(
+                                                voiceId,
+                                                if (category == assignedCategory) null else category
+                                            )
+                                        },
+                                        // 特例许可（用户 09-11 终裁"一并回原版"，推翻当日"不用改"）：回原版手调 12sp 标签
+                                        label = { Text(category, fontSize = 12.sp) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+            }
+        },
+        buttons = {
+            if (onPrev != null || onNext != null) {
+                // 分类/批量试听：只留切换按钮居中；退出键是右上角 ✕（见 title）——
+                // 底部三枚在弹窗实际内容宽 ~264dp 里塞不下，末尾会被挤成竖排
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(48.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (onPrev != null) {
+                        TextButton(onClick = onPrev, enabled = hasPrev) {
+                            Icon(Icons.AutoMirrored.Filled.NavigateBefore, contentDescription = "上一个")
+                            Text("上一个")
+                        }
+                    }
+                    if (onNext != null) {
+                        TextButton(onClick = onNext, enabled = hasNext) {
+                            Text("下一个")
+                            Icon(Icons.AutoMirrored.Filled.NavigateNext, contentDescription = "下一个")
+                        }
+                    }
+                }
+            } else {
+                // 单条配置项试听：删除重播后底部不再空白，提供关闭按钮
+                TextButton(onClick = onDismissRequest) {
+                    Text(stringResource(id = R.string.close))
+                }
+            }
+        }
+    )
+
+}

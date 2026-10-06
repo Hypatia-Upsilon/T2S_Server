@@ -1,0 +1,216 @@
+package com.github.jing332.tts_server_android.compose.backup
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import com.github.jing332.tts_server_android.compose.SoftSegmentedTextToggle
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import android.widget.Toast
+import com.github.jing332.compose.widgets.AppDialog
+import com.github.jing332.compose.widgets.TextCheckBox
+import com.github.jing332.tts_server_android.R
+
+/**
+ * 单入口备份弹窗：顶部完整/分享模式单选，内容项按模式给默认勾选且可自由取消，
+ * 底部"保存到"区：本地默认勾选 + WebDAV 可选，两者可同时勾选。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun BackupDialog(
+    onDismissRequest: () -> Unit,
+    // 本地备份文件夹（10-03）：选定后直写该目录，不再每次弹「另存为」。
+    // localDirLabel 空 = 未设置；onPickDir 触发系统目录选择（动作由 Activity 侧落地）
+    localDirLabel: String = "",
+    onPickDir: () -> Unit = {},
+    onBackupRequested: (BackupProfile, List<Type>, saveToLocal: Boolean, uploadToWebDav: Boolean) -> Unit,
+) {
+    var profile by remember { mutableStateOf(BackupProfile.PERSONAL_FULL) }
+    val checkedTypes = remember {
+        mutableStateListOf<Type>().apply { addAll(defaultTypes(BackupProfile.PERSONAL_FULL)) }
+    }
+
+    // 切模式时重置为该模式默认勾选集
+    fun resetTypes(target: BackupProfile) {
+        checkedTypes.clear()
+        checkedTypes.addAll(defaultTypes(target))
+    }
+
+    var saveToLocal by remember { mutableStateOf(true) }
+    var uploadToWebDav by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    AppDialog(
+        onDismissRequest = onDismissRequest,
+        // 标题固定「备份」（用户 09-11：原先随模式在 完整备份/分享备份 间切换，
+        // 与正下方的模式分段控件文字重复；模式含义由分段表达，标题不必跟）
+        title = { Text(stringResource(R.string.backup)) },
+        content = {
+            LazyColumn(Modifier.fillMaxWidth()) {
+                // 模式切换（用户 09-09 分段化；09-11 换软槽）：与音频参数弹窗「语速/音量/音高」同款
+                // SoftSegmentedTextToggle——浅底槽+选中项浮起胶囊，等分撑满（原描边胶囊宽度随文字已废）
+                item {
+                    SoftSegmentedTextToggle(
+                        options = listOf(
+                            stringResource(R.string.personal_complete_backup),
+                            stringResource(R.string.share_backup),
+                        ),
+                        selectedIndex = if (profile == BackupProfile.PERSONAL_FULL) 0 else 1,
+                        onSelect = { i ->
+                            val target =
+                                if (i == 0) BackupProfile.PERSONAL_FULL else BackupProfile.SHARE_SANITIZED
+                            if (profile != target) {
+                                profile = target
+                                resetTypes(target)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = stringResource(modeWarningRes(profile)),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                    Text(
+                        text = stringResource(R.string.backup_included_content),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+
+                // 内容项两列排布（用户 09-13 定）：7 项 7 行压成 4 行，省约 145dp，
+                // 整页一屏放得下、不再溢出到「保存到」区；长标签项「WebDAV 设置」单独占整行，
+                // 避免在半宽里折行被 48dp 行高裁掉
+                item {
+                    FlowRow(Modifier.fillMaxWidth()) {
+                        availableTypes(profile).forEach { type ->
+                            TextCheckBox(
+                                modifier = Modifier.fillMaxWidth(if (type == Type.WebDav) 1f else 0.5f),
+                                text = { Text(stringResource(type.nameStrId)) },
+                                checked = type in checkedTypes,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        checkedTypes.add(type)
+                                    } else {
+                                        // 取消"插件"时连带取消"插件变量"
+                                        if (type == Type.Plugin) checkedTypes.remove(Type.PluginVars)
+                                        if (type == Type.Preference) checkedTypes.remove(Type.WebDav)
+                                        checkedTypes.remove(type)
+                                    }
+                                },
+                                horizontalArrangement = Arrangement.Start,
+                            )
+                        }
+                    }
+                }
+
+                // 保存到：本地默认 + WebDAV 可选，可同时
+                item {
+                    HorizontalDivider()
+                    Text(
+                        text = stringResource(R.string.backup_save_to),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                    )
+                    TextCheckBox(
+                        modifier = Modifier.fillMaxWidth(),
+                        text = { Text(stringResource(R.string.backup_save_local)) },
+                        checked = saveToLocal,
+                        onCheckedChange = { saveToLocal = it },
+                        horizontalArrangement = Arrangement.Start,
+                    )
+                    // 文件夹行（仅本地勾选时显示）：已选=显示名+“更换”；未选=“选择文件夹”引导
+                    if (saveToLocal) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 48.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = localDirLabel.ifBlank { stringResource(R.string.backup_dir_none) },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = onPickDir) {
+                                Text(
+                                    stringResource(
+                                        if (localDirLabel.isBlank()) R.string.backup_dir_pick
+                                        else R.string.backup_dir_change
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    TextCheckBox(
+                        modifier = Modifier.fillMaxWidth(),
+                        text = { Text(stringResource(R.string.backup_to_webdav)) },
+                        checked = uploadToWebDav,
+                        onCheckedChange = { uploadToWebDav = it },
+                        horizontalArrangement = Arrangement.Start,
+                    )
+                }
+            }
+        },
+        buttons = {
+            TextButton(onClick = onDismissRequest) {
+                Text(stringResource(R.string.cancel))
+            }
+            TextButton(onClick = {
+                if (checkedTypes.isEmpty()) {
+                    Toast.makeText(context, context.getString(R.string.backup_need_content), Toast.LENGTH_SHORT).show()
+                    return@TextButton
+                }
+                if (!saveToLocal && !uploadToWebDav) {
+                    Toast.makeText(context, context.getString(R.string.backup_need_save_target), Toast.LENGTH_SHORT).show()
+                    return@TextButton
+                }
+                onBackupRequested(profile, checkedTypes.toList(), saveToLocal, uploadToWebDav)
+                onDismissRequest()
+            }) {
+                Text(stringResource(R.string.confirm))
+            }
+        },
+    )
+}
+
+private fun availableTypes(profile: BackupProfile): List<Type> = when (profile) {
+    BackupProfile.PERSONAL_FULL -> Type.typeList
+    BackupProfile.SHARE_SANITIZED -> listOf(
+        Type.Preference,
+        Type.List,
+        Type.SpeechRule,
+        Type.ReplaceRule,
+        Type.Plugin,
+    )
+}
+
+private fun defaultTypes(profile: BackupProfile): List<Type> = availableTypes(profile)
+
+private fun modeWarningRes(profile: BackupProfile): Int = when (profile) {
+    BackupProfile.PERSONAL_FULL -> R.string.personal_backup_sensitive_warning
+    BackupProfile.SHARE_SANITIZED -> R.string.share_backup_privacy_warning
+}
